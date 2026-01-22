@@ -1,3 +1,13 @@
+'''
+Author: Yunwei Li 1084087910@qq.com
+Date: 2025-12-03 13:58:19
+LastEditors: Yunwei Li 1084087910@qq.com
+LastEditTime: 2025-12-11 14:36:56
+FilePath: /trajdata/examples/visualization_example.py
+Description: 
+
+Copyright (c) 2025 by Tsinghua University, All Rights Reserved. 
+'''
 from collections import defaultdict
 
 from torch.utils.data import DataLoader
@@ -14,7 +24,7 @@ from trajdata.visualization.vis import plot_agent_batch
 
 def main():
     dataset = UnifiedDataset(
-        desired_data=["nusc_mini"],
+        desired_data=["nuplan_mini"],
         centric="agent",
         desired_dt=0.1,
         # history_sec=(3.2, 3.2),
@@ -32,10 +42,13 @@ def main():
         },
         num_workers=4,
         verbose=True,
+        # data_dirs={  # Remember to change this to match your filesystem!
+        #     "nusc_mini": "~/datasets/nuScenes",
+        #     "lyft_sample": "~/datasets/lyft/scenes/sample.zarr",
+        #     "nuplan_mini": "~/datasets/nuplan/dataset/nuplan-v1.1",
+        # },
         data_dirs={  # Remember to change this to match your filesystem!
-            "nusc_mini": "~/datasets/nuScenes",
-            "lyft_sample": "~/datasets/lyft/scenes/sample.zarr",
-            "nuplan_mini": "~/datasets/nuplan/dataset/nuplan-v1.1",
+            "nuplan_mini": "/home/lyw/1TBSSD/Datasets/trajdata/datasets/nuplan/dataset/nuplan-v1.1",
         },
     )
 
@@ -51,16 +64,16 @@ def main():
 
     batch: AgentBatch
     for batch in tqdm(dataloader):
-        plot_agent_batch_interactive(batch, batch_idx=0, cache_path=dataset.cache_path)
-        plot_agent_batch(batch, batch_idx=0)
+        plot_agent_batch_interactive(batch, batch_idx=0, cache_path=dataset.cache_path) # BOKEh 交互式绘图
+        plot_agent_batch(batch, batch_idx=0) # 简单绘图
 
-        animation = InteractiveAnimation(
+        animation = InteractiveAnimation( # 动画
             animate_agent_batch_interactive,
             batch=batch,
             batch_idx=0,
             cache_path=dataset.cache_path,
         )
-        animation.show()
+        animation.show() 
         # break
 
 

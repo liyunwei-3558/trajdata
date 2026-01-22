@@ -265,6 +265,12 @@ class UnifiedDataset(Dataset):
                 keep_in_memory=self.vector_map_params.get("keep_in_memory", True),
             )
 
+        # Set requested locations for datasets that support it
+        for env in self.envs:
+            if hasattr(env, 'set_requested_locations'):
+                locations = self._extract_locations_from_tags(matching_datasets, env.name)
+                env.set_requested_locations(locations)
+
         all_scenes_list: Union[List[SceneMetadata], List[Scene]] = list()
         for env in self.envs:
             if any(env.name in dataset_tuple for dataset_tuple in matching_datasets):
@@ -443,6 +449,35 @@ class UnifiedDataset(Dataset):
                     )
                 )
                 nuplan_warning_given = True
+
+    def _extract_locations_from_tags(
+        self, matching_datasets: List[SceneTag], env_name: str
+    ) -> Optional[Tuple[str, ...]]:
+        """Extract location names from scene tags for a given dataset.
+
+        For SinD, desired_data like "sind_train-train-cc" has tags like ("sind_train", "train", "cc")
+        We need to extract the location part (e.g., "cc") which is not the dataset name or split.
+
+        Args:
+            matching_datasets: List of scene tags matched from desired_data
+            env_name: Name of the environment (e.g., "sind_train")
+
+        Returns:
+            Tuple of location names if locations are found, None otherwise
+        """
+        # Known split names across all datasets
+        SPLITS = {"train", "val", "test", "train_val", "mini_train", "mini_val"}
+
+        locations = set()
+        for tag in matching_datasets:
+            if env_name in tag:
+                # For SinD, tags are like ("sind_train", "train", "cc")
+                # Extract location (the part that's not dataset name or split)
+                for part in tag._tag_tuple:
+                    if part != env_name and part not in SPLITS:
+                        locations.add(part)
+
+        return tuple(locations) if locations else None
 
     def _index_cache_path(
         self, ret_args: bool = False

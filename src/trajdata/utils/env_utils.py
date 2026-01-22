@@ -55,6 +55,11 @@ def get_raw_dataset(dataset_name: str, data_dir: str) -> RawDataset:
 
         return Av2Dataset(dataset_name, data_dir, parallelizable=True, has_maps=True)
 
+    if "sind" in dataset_name:
+        from trajdata.dataset_specific.sind import SindDataset
+
+        return SindDataset(dataset_name, data_dir, parallelizable=True, has_maps=True)
+
     raise ValueError(f"Dataset with name '{dataset_name}' is not supported")
 
 

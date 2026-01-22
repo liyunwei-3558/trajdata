@@ -8,8 +8,31 @@ from trajdata.data_structures.state import StateArray, StateTensor
 
 
 def main():
+    # dataset = UnifiedDataset(
+    #     desired_data=["lyft_sample-mini_val"],
+    #     centric="agent",
+    #     desired_dt=0.1,
+    #     history_sec=(3.2, 3.2),
+    #     future_sec=(4.8, 4.8),
+    #     only_predict=[AgentType.VEHICLE],
+    #     state_format="x,y,z,xd,yd,xdd,ydd,h",
+    #     agent_interaction_distances=defaultdict(lambda: 30.0),
+    #     incl_robot_future=False,
+    #     incl_raster_map=True,
+    #     raster_map_params={
+    #         "px_per_m": 2,
+    #         "map_size_px": 224,
+    #         "offset_frac_xy": (-0.5, 0.0),
+    #     },
+    #     num_workers=0,
+    #     verbose=True,
+    #     data_dirs={  # Remember to change this to match your filesystem!
+    #         "lyft_sample": "~/datasets/lyft_sample/scenes/sample.zarr",
+    #     },
+    # )
+    
     dataset = UnifiedDataset(
-        desired_data=["lyft_sample-mini_val"],
+        desired_data=["nuplan_mini"],
         centric="agent",
         desired_dt=0.1,
         history_sec=(3.2, 3.2),
@@ -27,9 +50,11 @@ def main():
         num_workers=0,
         verbose=True,
         data_dirs={  # Remember to change this to match your filesystem!
-            "lyft_sample": "~/datasets/lyft_sample/scenes/sample.zarr",
+            "nuplan_mini": "/home/lyw/1TBSSD/Datasets/trajdata/datasets/nuplan/dataset/nuplan-v1.1",
         },
     )
+
+
 
     print(f"# Data Samples: {len(dataset):,}")
 
