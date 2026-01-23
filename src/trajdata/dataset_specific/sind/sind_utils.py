@@ -99,7 +99,19 @@ class SindObject:
 
             tp_info_path = city_path / f"tp_info_{location}.pkl"
             frame_data_path = city_path / f"frame_data_{location}.pkl"
-            map_path = city_path / f"{location}_map.json"
+
+            # Check for map file: prefer output_json/ directory (correct format)
+            # over city directory (may have old flat format)
+            output_json_path = self.dataset_path / "output_json" / f"{location}_map.json"
+            city_map_path = city_path / f"{location}_map.json"
+
+            # Use output_json version if it exists, otherwise fall back to city directory
+            if output_json_path.exists():
+                map_path = output_json_path
+            elif city_map_path.exists():
+                map_path = city_map_path
+            else:
+                continue
 
             # Only store paths, don't load data yet
             if tp_info_path.exists() and map_path.exists():
@@ -369,11 +381,15 @@ def get_agent_metadata(
 def sind_map_to_vector_map(map_id: str, sind_map: Dict[str, Any]) -> VectorMap:
     """Convert SinD map data to trajdata VectorMap format.
 
-    SinD maps have the following structure:
-    - pedestrian_area: List of polygons (list of [x, y] points)
-    - drivable_area: List of polygons (list of [x, y] points)
-    - road_divider: List of polylines (list of [x, y] points)
-    - lane_divider: List of polylines (list of [x, y] points)
+    SinD maps have the following structure (from output_json/ directory):
+    - pedestrian_area: List of polylines (each is a list of [x, y] points)
+    - drivable_area: List of polylines (each is a list of [x, y] points)
+    - road_divider: List of polylines (each is a list of [x, y] points)
+    - lane_divider: List of polylines (each is a list of [x, y] points)
+
+    Note: Despite the name "drivable_area" and "pedestrian_area", these are
+    polylines (lines), not filled polygons. The drivable_area contains curbstone
+    lines that define the boundary of drivable areas.
 
     Args:
         map_id: Map identifier (format: "env_name:map_name")
@@ -387,178 +403,100 @@ def sind_map_to_vector_map(map_id: str, sind_map: Dict[str, Any]) -> VectorMap:
     extents_min = None
     extents_max = None
 
-    # Process drivable areas
+    # Process drivable areas (curbstone lines)
+    # Each polyline is closed to form a polygon representing a drivable area
     if "drivable_area" in sind_map:
-        drivable_area_data = sind_map["drivable_area"]
+        for idx, polyline_points in enumerate(sind_map["drivable_area"]):
+            if not polyline_points or len(polyline_points) < 3:
+                continue
 
-        # Check if data format is flat list of points (not list of polygons)
-        # Each point is [x, y], so if len(item) == 2 and all numbers, it's flat format
-        is_flat_format = False
-        if drivable_area_data and len(drivable_area_data) > 0:
-            first_item = drivable_area_data[0]
-            if len(first_item) == 2 and all(isinstance(x, (int, float)) for x in first_item):
-                is_flat_format = True
+            area_arr = np.array(polyline_points, dtype=np.float64)
 
-        if is_flat_format:
-            # Flat format: treat entire list as one polygon
-            area_arr = np.array(drivable_area_data, dtype=np.float64)
+            # Handle different input formats
+            if area_arr.ndim == 1:
+                # Single point
+                area_arr = area_arr.reshape(1, -1)
+            if area_arr.ndim != 2 or area_arr.shape[0] < 3:
+                # Need at least 3 points for a polygon
+                continue
+            if area_arr.shape[1] == 2:
+                # Add z=0 if only 2D points
+                area_arr = np.column_stack([area_arr, np.zeros(len(area_arr))])
+            elif area_arr.shape[1] != 3:
+                # Skip if not 2D or 3D
+                continue
 
-            # Need at least 3 points for a polygon
-            if area_arr.shape[0] >= 3:
-                if area_arr.shape[1] == 2:
-                    # Add z=0 if only 2D points
-                    area_arr = np.column_stack([area_arr, np.zeros(len(area_arr))])
+            # Close the polyline to form a polygon if not already closed
+            if not np.allclose(area_arr[0], area_arr[-1]):
+                area_arr = np.vstack([area_arr, area_arr[0]])
 
-                # Close the polygon if not already closed
-                if not np.allclose(area_arr[0], area_arr[-1]):
-                    area_arr = np.vstack([area_arr, area_arr[0]])
+            # Update extents
+            if extents_min is None:
+                extents_min = area_arr.min(0)
+                extents_max = area_arr.max(0)
+            else:
+                extents_min = np.minimum(extents_min, area_arr.min(0))
+                extents_max = np.maximum(extents_max, area_arr.max(0))
 
-                # Update extents
-                if extents_min is None:
-                    extents_min = area_arr.min(0)
-                    extents_max = area_arr.max(0)
-                else:
-                    extents_min = np.minimum(extents_min, area_arr.min(0))
-                    extents_max = np.maximum(extents_max, area_arr.max(0))
-
-                vector_map.add_map_element(
-                    RoadArea(
-                        id=f"RoadArea_0",
-                        exterior_polygon=Polyline(area_arr),
-                    )
+            vector_map.add_map_element(
+                RoadArea(
+                    id=f"RoadArea_{idx}",
+                    exterior_polygon=Polyline(area_arr),
                 )
-        else:
-            # Polygon list format (original expected format)
-            for idx, area_points in enumerate(sind_map["drivable_area"]):
-                if not area_points or len(area_points) < 3:
-                    continue
-
-                area_arr = np.array(area_points, dtype=np.float64)
-
-                # Handle different input formats
-                if area_arr.ndim == 1:
-                    # Single point
-                    area_arr = area_arr.reshape(1, -1)
-                if area_arr.ndim != 2 or area_arr.shape[0] < 3:
-                    # Need at least 3 points for a polygon
-                    continue
-                if area_arr.shape[1] == 2:
-                    # Add z=0 if only 2D points
-                    area_arr = np.column_stack([area_arr, np.zeros(len(area_arr))])
-                elif area_arr.shape[1] != 3:
-                    # Skip if not 2D or 3D
-                    continue
-
-                # Close the polygon if not already closed
-                if not np.allclose(area_arr[0], area_arr[-1]):
-                    area_arr = np.vstack([area_arr, area_arr[0]])
-
-                # Update extents
-                if extents_min is None:
-                    extents_min = area_arr.min(0)
-                    extents_max = area_arr.max(0)
-                else:
-                    extents_min = np.minimum(extents_min, area_arr.min(0))
-                    extents_max = np.maximum(extents_max, area_arr.max(0))
-
-                vector_map.add_map_element(
-                    RoadArea(
-                        id=f"RoadArea_{idx}",
-                        exterior_polygon=Polyline(area_arr),
-                    )
-                )
+            )
 
     # Process pedestrian areas
+    # Each polyline is closed to form a polygon representing a pedestrian walkway
     if "pedestrian_area" in sind_map:
-        pedestrian_area_data = sind_map["pedestrian_area"]
+        for idx, polyline_points in enumerate(sind_map["pedestrian_area"]):
+            if not polyline_points or len(polyline_points) < 3:
+                continue
 
-        # Check if data format is flat list of points (not list of polygons)
-        # Each point is [x, y], so if len(item) == 2 and all numbers, it's flat format
-        is_flat_format = False
-        if pedestrian_area_data and len(pedestrian_area_data) > 0:
-            first_item = pedestrian_area_data[0]
-            if len(first_item) == 2 and all(isinstance(x, (int, float)) for x in first_item):
-                is_flat_format = True
+            area_arr = np.array(polyline_points, dtype=np.float64)
 
-        if is_flat_format:
-            # Flat format: treat entire list as one polygon
-            area_arr = np.array(pedestrian_area_data, dtype=np.float64)
+            # Handle different input formats
+            if area_arr.ndim == 1:
+                # Single point
+                area_arr = area_arr.reshape(1, -1)
+            if area_arr.ndim != 2 or area_arr.shape[0] < 3:
+                # Need at least 3 points for a polygon
+                continue
+            if area_arr.shape[1] == 2:
+                # Add z=0 if only 2D points
+                area_arr = np.column_stack([area_arr, np.zeros(len(area_arr))])
+            elif area_arr.shape[1] != 3:
+                # Skip if not 2D or 3D
+                continue
 
-            # Need at least 3 points for a polygon
-            if area_arr.shape[0] >= 3:
-                if area_arr.shape[1] == 2:
-                    # Add z=0 if only 2D points
-                    area_arr = np.column_stack([area_arr, np.zeros(len(area_arr))])
+            # Close the polyline to form a polygon if not already closed
+            if not np.allclose(area_arr[0], area_arr[-1]):
+                area_arr = np.vstack([area_arr, area_arr[0]])
 
-                # Close the polygon if not already closed
-                if not np.allclose(area_arr[0], area_arr[-1]):
-                    area_arr = np.vstack([area_arr, area_arr[0]])
+            # Update extents
+            if extents_min is None:
+                extents_min = area_arr.min(0)
+                extents_max = area_arr.max(0)
+            else:
+                extents_min = np.minimum(extents_min, area_arr.min(0))
+                extents_max = np.maximum(extents_max, area_arr.max(0))
 
-                # Update extents
-                if extents_min is None:
-                    extents_min = area_arr.min(0)
-                    extents_max = area_arr.max(0)
-                else:
-                    extents_min = np.minimum(extents_min, area_arr.min(0))
-                    extents_max = np.maximum(extents_max, area_arr.max(0))
-
-                vector_map.add_map_element(
-                    PedWalkway(
-                        id=f"PedWalkway_0",
-                        polygon=Polyline(area_arr),
-                    )
+            vector_map.add_map_element(
+                PedWalkway(
+                    id=f"PedWalkway_{idx}",
+                    polygon=Polyline(area_arr),
                 )
-        else:
-            # Polygon list format (original expected format)
-            for idx, area_points in enumerate(sind_map["pedestrian_area"]):
-                if not area_points or len(area_points) < 3:
-                    continue
+            )
 
-                area_arr = np.array(area_points, dtype=np.float64)
-
-                # Handle different input formats
-                if area_arr.ndim == 1:
-                    # Single point
-                    area_arr = area_arr.reshape(1, -1)
-                if area_arr.ndim != 2 or area_arr.shape[0] < 3:
-                    # Need at least 3 points for a polygon
-                    continue
-                if area_arr.shape[1] == 2:
-                    # Add z=0 if only 2D points
-                    area_arr = np.column_stack([area_arr, np.zeros(len(area_arr))])
-                elif area_arr.shape[1] != 3:
-                    # Skip if not 2D or 3D
-                    continue
-
-                # Close the polygon if not already closed
-                if not np.allclose(area_arr[0], area_arr[-1]):
-                    area_arr = np.vstack([area_arr, area_arr[0]])
-
-                # Update extents
-                if extents_min is None:
-                    extents_min = area_arr.min(0)
-                    extents_max = area_arr.max(0)
-                else:
-                    extents_min = np.minimum(extents_min, area_arr.min(0))
-                    extents_max = np.maximum(extents_max, area_arr.max(0))
-
-                vector_map.add_map_element(
-                    PedWalkway(
-                        id=f"PedWalkway_{idx}",
-                        polygon=Polyline(area_arr),
-                    )
-                )
-
-    # Convert road_divider and lane_divider to simple lanes for spatial indexing
-    # These are not true lanes with connectivity, but enable KDTree construction
+    # Process road_divider and lane_divider as RoadLanes
+    # These are polylines (lines), not polygons
     lane_idx = 0
     for divider_name, divider_key in [("road_divider", "road_divider"), ("lane_divider", "lane_divider")]:
         if divider_key in sind_map:
-            for idx, line_points in enumerate(sind_map[divider_key]):
-                if not line_points:
+            for idx, polyline_points in enumerate(sind_map[divider_key]):
+                if not polyline_points:
                     continue
 
-                line_arr = np.array(line_points, dtype=np.float64)
+                line_arr = np.array(polyline_points, dtype=np.float64)
 
                 # Handle different input formats
                 if line_arr.ndim == 1:

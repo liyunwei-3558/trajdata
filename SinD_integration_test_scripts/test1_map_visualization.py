@@ -82,6 +82,7 @@ def main():
     print(f"  Extent: {vec_map.extent}")
     print(f"  Number of RoadAreas: {len(vec_map.elements[MapElementType.ROAD_AREA])}")
     print(f"  Number of PedWalkways: {len(vec_map.elements[MapElementType.PED_WALKWAY])}")
+    print(f"  Number of RoadLanes: {len(vec_map.elements[MapElementType.ROAD_LANE])}")
 
     # Rasterize the map using raster_utils which supports RoadAreas and PedWalkways
     print(f"\nRasterizing Map...")
@@ -130,6 +131,15 @@ def main():
         raster_pts = map_utils.transform_points(polygon_pts, raster_from_world)
         ax2.fill(raster_pts[:, 0], raster_pts[:, 1],
                  alpha=0.5, color='green', edgecolor='darkgreen', linewidth=0.5)
+
+    # Draw all road lanes (from road_divider and lane_divider)
+    print("Drawing road lanes...")
+    road_lanes = vec_map.elements[MapElementType.ROAD_LANE]
+    for lane_id, road_lane in road_lanes.items():
+        center_pts = road_lane.center.xy
+        raster_pts = map_utils.transform_points(center_pts, raster_from_world)
+        ax2.plot(raster_pts[:, 0], raster_pts[:, 1],
+                 alpha=0.6, color='blue', linewidth=1.0, linestyle='-')
 
     # Query example: Pick a random point and find closest area
     if len(road_areas) > 0:
