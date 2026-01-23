@@ -159,7 +159,7 @@ def test_specific_scene():
     sind_data_dir = Path("/home/lyw/1TBSSD/Datasets/ClaudeWork/My_trajdata/datasets/SinD_dataset")
 
     dataset = UnifiedDataset(
-        desired_data=["sind-xa"],  # Only load xa city
+        desired_data=["sind-tj"],  # Only load xa city
         data_dirs={"sind": str(sind_data_dir)},
         desired_dt=0.1,
         centric="agent",
