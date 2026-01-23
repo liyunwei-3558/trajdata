@@ -46,8 +46,10 @@ def main():
     print(f"NOTE: Using lazy loading to save memory")
 
     # Create UnifiedDataset
+    # Use specific location tags to load only selected cities
+    desired_data_tags = [f"sind-{loc}" for loc in selected_locations]
     dataset = UnifiedDataset(
-        desired_data=["sind"],  # Dataset name
+        desired_data=desired_data_tags,  # Only load selected locations
         data_dirs={
             "sind": str(sind_data_dir),
         },
@@ -154,10 +156,10 @@ def main():
 def test_specific_scene():
     """Alternative: Visualize a specific scene by index."""
     # Configuration
-    sind_data_dir = Path("/path/to/SinD_dataset")
+    sind_data_dir = Path("/home/lyw/1TBSSD/Datasets/ClaudeWork/My_trajdata/datasets/SinD_dataset")
 
     dataset = UnifiedDataset(
-        desired_data=["sind"],
+        desired_data=["sind-xa"],  # Only load xa city
         data_dirs={"sind": str(sind_data_dir)},
         desired_dt=0.1,
         centric="agent",

@@ -291,9 +291,7 @@ class SindObject:
         # Find the max frame_id across all tracks
         max_frame = 0
         for tp_id, tp_data in tp_info.items():
-            if "Frame_nums" in tp_data:
-                max_frame = max(max_frame, tp_data["Frame_nums"])
-            elif "State" in tp_data:
+            if "State" in tp_data:
                 state_df = tp_data["State"]
                 if "frame_id" in state_df.columns:
                     max_frame = max(max_frame, state_df["frame_id"].max())
@@ -355,10 +353,6 @@ def get_agent_metadata(
 
     agent_type_enum, extent = agent_mapping
 
-    # Get frame range
-    first_frame = int(tp_data.get("InitialFrame", 0))
-    last_frame = int(tp_data.get("FinalFrame", first_frame))
-
     # Use size from data if available, otherwise use default
     if "Length" in tp_data and "Width" in tp_data:
         length = float(tp_data["Length"])
@@ -368,6 +362,15 @@ def get_agent_metadata(
             agent_type_str, (AgentType.VEHICLE, 4.5, 2.0, 1.5)
         )
         extent = FixedExtent(length=length, width=width, height=height)
+
+    # IMPORTANT: Do NOT use InitialFrame/FinalFrame from tp_data directly.
+    # These values in SinD data are not reliable (FinalFrame can be a weird float).
+    # Instead, we'll determine first_timestep and last_timestep from the actual
+    # frame_id values in the State DataFrame. This is done in get_agent_info()
+    # in sind_dataset.py, which will update the agent metadata after reading
+    # the actual state data. Here we set placeholder values that will be updated.
+    first_frame = 0
+    last_frame = 0
 
     return AgentMetadata(
         name=agent_id,

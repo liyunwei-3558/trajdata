@@ -123,6 +123,10 @@ class SindDataset(RawDataset):
                 scene_name = f"{location}_{scene_id}"
                 scene_length = self.dataset_obj.get_scene_length(scene_name)
 
+                # Skip empty scenes (scenes with no agents or invalid length)
+                if scene_length <= 1:
+                    continue
+
                 record_list.append(
                     SindSceneRecord(
                         name=scene_name,
@@ -180,11 +184,17 @@ class SindDataset(RawDataset):
             if tag_locations and record.location not in tag_locations:
                 continue
 
-            scenes.append(
-                self._create_scene(
-                    record.name, record.location, record.length, record.data_idx
-                )
+            # Create Scene object from cached record (like other datasets do)
+            scene = Scene(
+                env_metadata=self.metadata,
+                name=record.name,
+                location=record.location,
+                data_split=record.split,
+                length_timesteps=record.length,
+                raw_data_idx=record.data_idx,
+                data_access_info=None,  # Not used when loading from cache
             )
+            scenes.append(scene)
 
         return scenes
 
@@ -255,6 +265,8 @@ class SindDataset(RawDataset):
         agent_presence: List[List[AgentMetadata]] = [[] for _ in range(scene.length_timesteps)]
 
         df_records = []
+        # Track each agent's actual frame range from the State DataFrame
+        agent_frame_ranges: Dict[str, Tuple[int, int]] = {}
 
         # Process each track (trajectory point) in the scene
         tp_info = scenario["tp_info"]
@@ -265,12 +277,21 @@ class SindDataset(RawDataset):
             if agent_metadata is None:
                 continue
 
-            agent_list.append(agent_metadata)
-
             # Extract state data from the DataFrame
             state_df = tp_data.get("State")
-            if state_df is None:
+            if state_df is None or state_df.empty:
                 continue
+
+            # Determine the actual frame range from the State DataFrame
+            first_frame = int(state_df["frame_id"].min())
+            last_frame = int(state_df["frame_id"].max())
+            agent_frame_ranges[agent_metadata.name] = (first_frame, last_frame)
+
+            # Update agent metadata with correct timesteps
+            agent_metadata.first_timestep = first_frame
+            agent_metadata.last_timestep = last_frame
+
+            agent_list.append(agent_metadata)
 
             # Process each row in the state DataFrame
             for _, row in state_df.iterrows():
