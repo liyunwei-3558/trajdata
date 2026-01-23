@@ -321,10 +321,12 @@ class UnifiedDataset(Dataset):
                     ):
                         # Use only rank 0 process for caching when using multi-GPU torch training.
                         if rank == 0:
+                            # Pass scene_tags for datasets that support selective caching (like SinD)
                             env.cache_maps(
                                 self.cache_path,
                                 self.cache_class,
                                 self.raster_map_params,
+                                scene_tags=matching_datasets,
                             )
 
                         # Wait for rank 0 process to be done with caching.
