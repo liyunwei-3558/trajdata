@@ -46,7 +46,7 @@ def main():
     sind_data_dir = Path("/home/lyw/1TBSSD/Datasets/ClaudeWork/My_trajdata/datasets/SinD_dataset")
 
     # Select a location to visualize (you can change this)
-    location = "cc"  # Xi'an
+    location = "cqR"  # Test cqR
 
     print(f"=== SinD Map Visualization Test ===")
     print(f"Location: {location} ({SIND_LOCATION_NAMES.get(location, 'Unknown')})")
@@ -188,7 +188,8 @@ def main():
     output_path = Path(__file__).parent / f"sind_map_{location}_visualization.png"
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"\nSaved visualization to: {output_path}")
-    plt.show()
+    # plt.show()  # Commented out to avoid blocking in batch mode
+    plt.close()  # Close the figure to free memory
 
 
 if __name__ == "__main__":
