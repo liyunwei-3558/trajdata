@@ -21,13 +21,17 @@ SIND_LOCATIONS = ("cc", "xa", "cqNR", "tj", "cqIR", "xasl", "cqR")
 # Note: SinD also has broader categories:
 #   mv (motor vehicle) = 机动车 - generally maps to VEHICLE
 #   nmv (non-motor vehicle) = 非机动车 - generally maps to BICYCLE
+#
+# Note on tricycle: Chinese tricycles (三轮车) are large vehicles used for cargo
+# or passengers, typically 3-4m long and 1-1.7m wide. They are mapped to VEHICLE
+# instead of BICYCLE because their size and behavior are more similar to vehicles.
 SIND_AGENT_TYPE_DATA: Dict[str, Tuple[AgentType, float, float, float]] = {
     "car": (AgentType.VEHICLE, 4.5, 2.0, 1.5),
     "truck": (AgentType.VEHICLE, 10.0, 2.5, 3.0),
     "bus": (AgentType.VEHICLE, 9.0, 3.0, 4.0),
     "motorcycle": (AgentType.MOTORCYCLE, 2.0, 0.8, 1.5),
     "bicycle": (AgentType.BICYCLE, 1.8, 0.6, 1.5),
-    "tricycle": (AgentType.BICYCLE, 2.0, 1.0, 1.5),
+    "tricycle": (AgentType.VEHICLE, 3.5, 1.5, 1.5),  # Chinese tricycle = large vehicle
     "pedestrian": (AgentType.PEDESTRIAN, 0.7, 0.7, 1.7),
     # Broader categories (fallbacks)
     "mv": (AgentType.VEHICLE, 4.5, 2.0, 1.5),  # motor vehicle = 机动车
@@ -353,15 +357,24 @@ def get_agent_metadata(
 
     agent_type_enum, extent = agent_mapping
 
-    # Use size from data if available, otherwise use default
+    # Use size from data if available and valid, otherwise use default
     if "Length" in tp_data and "Width" in tp_data:
-        length = float(tp_data["Length"])
-        width = float(tp_data["Width"])
-        # Use default height from mapping
-        _, _, _, height = SIND_AGENT_TYPE_DATA.get(
-            agent_type_str, (AgentType.VEHICLE, 4.5, 2.0, 1.5)
-        )
-        extent = FixedExtent(length=length, width=width, height=height)
+        try:
+            length = float(tp_data["Length"])
+            width = float(tp_data["Width"])
+            # Check if values are valid (not NaN or infinite)
+            if not (np.isnan(length) or np.isnan(width) or
+                    np.isinf(length) or np.isinf(width) or
+                    length <= 0 or width <= 0):
+                # Use default height from mapping
+                _, _, _, height = SIND_AGENT_TYPE_DATA.get(
+                    agent_type_str, (AgentType.VEHICLE, 4.5, 2.0, 1.5)
+                )
+                extent = FixedExtent(length=length, width=width, height=height)
+            # else: fall back to default extent from mapping
+        except (ValueError, TypeError):
+            # If conversion fails, use default extent from mapping
+            pass
 
     # IMPORTANT: Do NOT use InitialFrame/FinalFrame from tp_data directly.
     # These values in SinD data are not reliable (FinalFrame can be a weird float).

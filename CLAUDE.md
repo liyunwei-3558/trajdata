@@ -89,11 +89,20 @@ python -m build
 
 ### Caching System
 
-**`src/trajdata/caching/`** - Two-stage caching:
+**`src/trajdata/caching/`** - Multi-stage caching system:
 - Cache location: `~/.unified_data_cache/` by default
-- `env_cache.py` - Environment-level scene list caching
+- **IMPORTANT**: `_get_matching_scenes_from_cache` should return Scene objects created from cached records, NOT loaded from `.dill` files. The Scene `.dill` files are only created later during agent info caching.
+- `env_cache.py` - Environment-level scene list caching (`scenes_list.dill`)
 - `scene_cache.py` - Scene-level agent data and map caching
-- `df_cache.py` - DataFrame cache implementation
+- `df_cache.py` - DataFrame cache implementation (Feather format for fast columnar access)
+
+**Cache Flow**:
+1. `_get_matching_scenes_from_obj` creates `SceneMetadata` and saves scene records to `scenes_list.dill`
+2. `_get_matching_scenes_from_cache` creates Scene objects from records (for loading from cache)
+3. `cache_maps` caches vector maps
+4. `get_agent_info` processes raw data, saves to `.feather` files, and saves Scene with `agent_presence` to `.dill` files
+
+**Common gotcha**: When implementing `_get_matching_scenes_from_cache`, follow the pattern from nusc_dataset.py - create Scene objects directly from the cached records using the scene metadata fields, do not try to load non-existent Scene `.dill` files.
 
 ### Map System
 
@@ -145,39 +154,55 @@ Datasets use hyphen-separated tags: `"{dataset_name}-{split}-{location}"` (e.g.,
 
 SinD (Signalized Intersections) is a Chinese intersection dataset with 7 locations. Each location functions as a split.
 
+### Documentation Files
+- `SIND_INTEGRATION.md` - Complete integration documentation with architecture and gotchas
+- `SIND_USAGE_WORKFLOW.md` - Step-by-step usage guide
+
 ### Data Structure
 ```
 /path/to/SinD_dataset/
     ├── cc/
     │   ├── tp_info_cc.pkl
     │   ├── frame_data_cc.pkl
-    │   └── cc_map.json
+    │   ├── cc_map.json
+    │   └── cc_map.osm (Lanelet2 format, optional)
     ├── xa/
     │   ├── tp_info_xa.pkl
     │   ├── frame_data_xa.pkl
-    │   └── xa_map.json
+    │   ├── xa_map.json
+    │   └── xa_map.osm (Lanelet2 format, optional)
+    ├── Lanelet_maps_SinD/     # Lanelet2 OSM files for all locations
+    │   ├── lanelet2_tj.osm
+    │   ├── lanelet2_cqNR.osm
+    │   ├── lanelet2_cc.osm
+    │   └── ... (one per location)
     └── ... (cqNR, tj, cqIR, xasl, cqR)
 ```
 
-### Usage Example
-```python
-# Load all locations (requires significant memory)
-dataset = UnifiedDataset(
-    desired_data=["sind"],
-    data_dirs={"sind": "/path/to/SinD_dataset"},
-    desired_dt=0.1,  # 10Hz
-    centric="agent",
-    only_predict=[AgentType.VEHICLE],
-    incl_robot_future=False,
-)
+### Lanelet2 Map Support
 
-# Load only specific location (recommended to save memory)
+SinD supports two map formats:
+- **JSON format** (default): Simple drivable/pedestrian areas and dividers
+- **Lanelet2 OSM format** (optional): Rich lane information with connectivity relations
+
+To enable Lanelet2 maps:
+
+```python
 dataset = UnifiedDataset(
-    desired_data=["sind-xa"],  # Only load xa location
+    desired_data=["sind-tj"],
     data_dirs={"sind": "/path/to/SinD_dataset"},
-    desired_dt=0.1,
-    centric="agent",
+    map_params={"use_lanelet2_maps": True},  # Enable Lanelet2
 )
+```
+
+Lanelet2 maps provide:
+- **RoadLane** elements with centerlines and edge boundaries
+- **PedCrosswalk** elements (convex hull of zebra_marking pairs)
+- **Lane connectivity** (next/prev lanes, adjacent lanes)
+
+The OSM files should be placed in:
+```
+/path/to/SinD_dataset/Lanelet_maps_SinD/lanelet2_{location}.osm
 ```
 
 ### Supported Agent Types
@@ -194,12 +219,17 @@ dataset = UnifiedDataset(
 
 **Location Filtering**: To load only specific locations (to save memory), use the format `desired_data=["sind-xa"]` instead of `desired_data=["sind"]`. This filters scenes and caches only the specified location.
 
+**CRITICAL: Timestep Range Issues**: SinD's `InitialFrame`/`FinalFrame` values are unreliable (can be weird floats like 22022.02202202202). The implementation computes `first_timestep` and `last_timestep` from actual `frame_id` values in State DataFrame. Scene length is calculated as `max(frame_id) + 1` across ALL agents, not using `Frame_nums` (which is a count).
+
+**NaN Extent Handling**: SinD data may contain NaN values for `Length`/`Width`. The implementation validates these values and falls back to default extents when they are invalid.
+
 ### Test Scripts
 See `SinD_integration_test_scripts/` for examples:
 - `test1_map_visualization.py` - Map loading and visualization
 - `test2_batch_visualization.py` - Batch data loading and trajectory visualization
 - `test3_read_agent_states.py` - Query agent states at specific timesteps
-- `test_single_location.py` - Load only one location to save memory
+- `test4_bokeh_interactive.py` - Interactive Bokeh visualization with Lanelet2 maps
+- `test6_lanelet2_map.py` - Lanelet2 map parsing tests
 
 ### Accessing Agent State Data
 

@@ -19,6 +19,10 @@ from trajdata.dataset_specific.sind.sind_utils import (
     get_agent_metadata,
     sind_map_to_vector_map,
 )
+from trajdata.dataset_specific.sind.sind_lanelet2_utils import (
+    lanelet2_map_to_vector_map,
+    get_lanelet2_map_path,
+)
 from trajdata.utils import arr_utils
 
 SIND_DATASET_NAME = "sind"
@@ -326,9 +330,18 @@ class SindDataset(RawDataset):
                 ax = float(row.get("ax", np.nan))
                 ay = float(row.get("ay", np.nan))
 
-                # Get size info
-                length = float(row.get("length", agent_metadata.extent.length))
-                width = float(row.get("width", agent_metadata.extent.width))
+                # Get size info - use default from metadata if row value is NaN/invalid
+                length_val = row.get("length", agent_metadata.extent.length)
+                width_val = row.get("width", agent_metadata.extent.width)
+
+                # Check if values are valid (not NaN and positive)
+                if pd.isna(length_val) or length_val <= 0:
+                    length_val = agent_metadata.extent.length
+                if pd.isna(width_val) or width_val <= 0:
+                    width_val = agent_metadata.extent.width
+
+                length = float(length_val)
+                width = float(width_val)
                 height = float(agent_metadata.extent.height)
 
                 df_records.append(
@@ -391,8 +404,12 @@ class SindDataset(RawDataset):
             cache_path: Path to cache directory
             map_cache_class: SceneCache class for caching
             map_params: Dictionary of map parameters (e.g., resolution)
+                - use_lanelet2_maps: bool, if True use Lanelet2 format for supported locations
             scene_tags: Optional list of SceneTag objects to determine which locations to cache
         """
+        # Check if Lanelet2 maps should be used
+        use_lanelet2_maps = map_params.get("use_lanelet2_maps", False)
+
         # Determine which locations to cache based on scene_tags
         if scene_tags:
             # Extract locations from scene_tags
@@ -419,13 +436,32 @@ class SindDataset(RawDataset):
 
         for idx, location in enumerate(locations_to_cache):
             print(f"Loading map for location: {location}")
-            # Lazy load map data for this location
-            sind_map = self.dataset_obj.load_map(f"{location}_dummy_scene")
-            vector_map = sind_map_to_vector_map(
-                f"{self.name}:{location}", sind_map
-            )
-            map_cache_class.finalize_and_cache_map(cache_path, vector_map, map_params)
 
-            # IMPORTANT: Unload the city data after caching to free memory
-            self.dataset_obj.unload_city(location)
-            print(f"Finished caching {location}, memory freed")
+            # Check if Lanelet2 map should be used for this location
+            if use_lanelet2_maps:
+                lanelet2_path = get_lanelet2_map_path(location, self.metadata.data_dir)
+                if lanelet2_path is not None:
+                    print(f"  Using Lanelet2 map: {lanelet2_path}")
+                    vector_map = lanelet2_map_to_vector_map(
+                        f"{self.name}:{location}", str(lanelet2_path)
+                    )
+                else:
+                    print(f"  Lanelet2 map not found for {location}, using JSON format")
+                    # Fall back to JSON format
+                    sind_map = self.dataset_obj.load_map(f"{location}_dummy_scene")
+                    vector_map = sind_map_to_vector_map(
+                        f"{self.name}:{location}", sind_map
+                    )
+                    # Unload city data after caching
+                    self.dataset_obj.unload_city(location)
+            else:
+                # Use JSON format (default)
+                sind_map = self.dataset_obj.load_map(f"{location}_dummy_scene")
+                vector_map = sind_map_to_vector_map(
+                    f"{self.name}:{location}", sind_map
+                )
+                # Unload city data after caching
+                self.dataset_obj.unload_city(location)
+
+            map_cache_class.finalize_and_cache_map(cache_path, vector_map, map_params)
+            print(f"Finished caching {location}")
