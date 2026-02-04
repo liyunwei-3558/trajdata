@@ -158,3 +158,13 @@ cython_debug/
 #.idea/
 
 datasets/
+
+# Test outputs and visualization
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Lanelet2 map files (test data)
+*.osm
+Lanelet2_map_SinD/
