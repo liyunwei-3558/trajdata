@@ -37,7 +37,7 @@
 │   ├── tp_info_xa.pkl
 │   ├── frame_data_xa.pkl
 │   └── xa_map.json
-├── cqNR/                                  # 重庆北区
+├── cqNR/                                  # 重庆
 │   ├── tp_info_cqNR.pkl
 │   ├── frame_data_cqNR.pkl
 │   └── cqNR_map.json
@@ -54,9 +54,16 @@
 │   ├── frame_data_xasl.pkl
 │   └── xasl_map.json
 └── cqR/                                   # 重庆
-    ├── tp_info_cqR.pkl
-    ├── frame_data_cqR.pkl
-    └── cqR_map.json
+|    ├── tp_info_cqR.pkl
+|    ├── frame_data_cqR.pkl
+|    └── cqR_map.json
+|├── Lanelet_maps_SinD                     # Lanelet2 地图
+│   ├── lanelet2_cc.osm
+│   ├── lanelet2_cqIR.osm
+│   ├── lanelet2_cqNR.osm
+│   ├── lanelet2_cqR.osm
+│   ├── lanelet2_tj.osm
+│   └── lanelet2_xasl.osm
 ```
 
 **重要说明：**
@@ -76,7 +83,7 @@
 sind_data_dir = Path("/path/to/your/SinD_dataset")
 ```
 
-### 方法 2：使用环境变量（推荐）
+### 方法 2：使用环境变量
 
 在 `~/.bashrc` 或 `~/.zshrc` 中添加：
 

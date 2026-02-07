@@ -19,7 +19,7 @@
 ├── cc/
 │   ├── tp_info_cc.pkl
 │   ├── frame_data_cc.pkl
-│   └── cc_map.json  (或在 output_json/cc_map.json)
+│   └── cc_map.json  
 ├── xa/
 │   ├── tp_info_xa.pkl
 │   ├── frame_data_xa.pkl
@@ -29,6 +29,7 @@
 ├── cqIR/
 ├── xasl/
 └── cqR/
+___ Lanelet2_maps_SinD/
 ```
 
 ### 1.2 配置数据路径

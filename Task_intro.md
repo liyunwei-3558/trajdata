@@ -2,7 +2,7 @@
  * @Author: Yunwei Li 1084087910@qq.com
  * @Date: 2026-01-22 18:44:00
  * @LastEditors: Yunwei Li 1084087910@qq.com
- * @LastEditTime: 2026-01-23 23:01:27
+ * @LastEditTime: 2026-02-07 13:07:54
  * @FilePath: /My_trajdata/Task_intro.md
  * @Description: 
  * 
@@ -23,5 +23,5 @@ Updated 1
 
 现在已经通过了4个test证明sinD数据集已经初步合并到trajdata工具中。
 但是仍然有一些问题：
-1. 在可视化中看不见任何行人
-2. 感觉有的类别为BICYCLE的尺寸非常大，请确认类别读取的正确性
+1. 在可视化中看不见任何行人?是因为xa路口没有行人，还是行人读取有问题，请确认
+2. 感觉有的类别为BICYCLE的尺寸非常大，请看看是否可以在不影响其他数据集的情况下拓展trajdata中的类型，增加三轮车（TRICYCLE）;如果风险比较大，那么可以将三轮车并入Vehicle。
