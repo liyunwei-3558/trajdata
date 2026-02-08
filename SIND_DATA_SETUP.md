@@ -23,7 +23,45 @@
 
 ---
 
-## 二、数据集目录结构
+## 二、环境配置
+
+### 方法 1：使用 Conda（推荐）
+
+```bash
+# 使用提供的环境配置文件创建环境
+conda env create -f trajdata_environment.yml
+
+# 激活环境
+conda activate trajdata
+
+# 安装 trajdata（开发模式）
+pip install -e .
+```
+
+### 方法 2：使用 pip + requirements.txt
+
+```bash
+# 创建 Python 3.10 环境
+conda create -n trajdata python=3.10
+conda activate trajdata
+
+# 安装依赖
+pip install -r requirements.txt
+
+# 安装 trajdata（开发模式）
+pip install -e .
+```
+
+### 环境文件说明
+
+| 文件 | 说明 | 适用场景 |
+|------|------|---------|
+| `trajdata_environment.yml` | Conda 环境配置文件 | 使用 Conda 管理环境 |
+| `requirements.txt` | Python 依赖列表 | 使用 pip 安装 |
+
+---
+
+## 三、数据集目录结构
 
 ### 获取数据集后，请按以下结构组织文件：
 
@@ -72,7 +110,7 @@
 
 ---
 
-## 三、配置数据路径
+## 四、配置数据路径
 
 ### 方法 1：直接修改脚本中的路径
 
@@ -100,7 +138,7 @@ sind_data_dir = Path(os.environ.get("SIND_DATA_DIR", "/default/path"))
 
 ---
 
-## 四、测试脚本说明
+## 五、测试脚本说明
 
 所有测试脚本位于 `SinD_integration_test_scripts/` 目录下。
 
@@ -241,7 +279,7 @@ python test6_lanelet2_map.py
 
 ---
 
-## 五、快速开始
+## 六、快速开始
 
 ### 步骤 1：配置数据路径
 
@@ -281,7 +319,7 @@ python SinD_integration_test_scripts/test3_read_agent_states.py
 
 ---
 
-## 六、常见问题
+## 七、常见问题
 
 ### Q1: 找不到地图文件
 
@@ -323,7 +361,7 @@ rm -rf ~/.unified_data_cache/sind/
 
 ---
 
-## 七、参考文档
+## 八、参考文档
 
 | 文档 | 内容 |
 |------|------|
@@ -333,6 +371,6 @@ rm -rf ~/.unified_data_cache/sind/
 
 ---
 
-## 八、联系与支持
+## 九、联系与支持
 
 如有问题，请联系项目维护者或在项目 Issues 中提问。
