@@ -171,4 +171,7 @@ datasets/
 
 # Claude Files
 Task_intro.md
+.claude/
 
+# Risk mining generated artifacts
+risk_mining/output/

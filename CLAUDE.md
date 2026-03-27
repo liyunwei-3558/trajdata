@@ -253,3 +253,60 @@ heading = state.heading[0]
 ```
 
 **Note**: `AgentMetadata` uses `.type` (not `.agent_type`) to access the `AgentType`.
+
+## Map API Usage
+
+To access vector maps directly without loading a full dataset:
+
+```python
+from pathlib import Path
+from trajdata import MapAPI, VectorMap
+
+cache_path = Path("~/.unified_data_cache").expanduser()
+map_api = MapAPI(cache_path)
+
+vector_map: VectorMap = map_api.get_map("nusc_mini:boston-seaport")
+```
+
+Map IDs follow the pattern: `"{dataset_name}:{location}"`.
+
+## Simulation Interface
+
+trajdata can initialize simulations from real data and track agent motion:
+
+```python
+from typing import Dict
+import numpy as np
+from trajdata import UnifiedDataset
+from trajdata.simulation import SimulationScene
+
+dataset = UnifiedDataset(
+    desired_data=["nusc_mini"],
+    data_dirs={"nusc_mini": "~/datasets/nuScenes"},
+)
+
+scene = dataset.get_scene(scene_idx=0)
+sim_scene = SimulationScene(
+    env_name="nusc_mini_sim",
+    scene_name="sim_scene",
+    scene=scene,
+    dataset=dataset,
+    init_timestep=0,
+    freeze_agents=True,
+)
+
+obs = sim_scene.reset()
+for t in range(1, sim_scene.scene.length_timesteps):
+    new_xyh_dict: Dict[str, np.ndarray] = dict()
+    for idx, agent_name in enumerate(obs.agent_name):
+        curr_yaw = obs.curr_agent_state[idx, -1]
+        curr_pos = obs.curr_agent_state[idx, :2]
+        next_state = np.zeros((3,))
+        next_state[:2] = curr_pos
+        next_state[2] = curr_yaw
+        new_xyh_dict[agent_name] = next_state
+
+    obs = sim_scene.step(new_xyh_dict)
+```
+
+See `src/trajdata/simulation/` for the simulation implementation.

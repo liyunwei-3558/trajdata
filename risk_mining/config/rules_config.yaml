@@ -1,0 +1,50 @@
+# Risk Mining Pipeline Configuration
+#
+# This file configures the risk mining pipeline for extracting
+# "Intersection Traffic Disturbance Scenarios" from trajectory data.
+
+# Data configuration
+data:
+  # Datasets to process (trajdata format)
+  desired_data: ["sind-tj"]
+  # Data directories (trajdata format)
+  data_dirs:
+    sind: "~/datasets/SinD_dataset"
+  # Desired time delta (seconds)
+  desired_dt: 0.1
+
+# Rules configuration
+rules:
+  # Spatial rules
+  spatial:
+    # Agents within ROI radius
+    in_roi:
+      enabled: true
+      roi_radius: 50.0  # meters
+    # Agents on conflicting lanes
+    conflict_lane:
+      enabled: true
+      conflict_distance: 10.0  # meters
+
+  # Dynamic rules
+  dynamic:
+    # Time-to-collision rule
+    ttc:
+      enabled: true
+      ttc_threshold: 3.0  # seconds
+    # Deceleration rule
+    deceleration:
+      enabled: true
+      decel_threshold: 3.0  # m/s^2
+
+# Episode slicer configuration
+slicer:
+  # Seconds before peak risk moment
+  pre_buffer_sec: 2.0
+  # Seconds after peak risk moment
+  post_buffer_sec: 2.0
+
+# Output configuration
+output:
+  # Output directory (relative to home or absolute)
+  output_dir: "./output"
