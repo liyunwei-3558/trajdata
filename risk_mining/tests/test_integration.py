@@ -1,188 +1,174 @@
 """
-Integration test for risk mining pipeline with SinD dataset.
+Integration-style tests for the refactored risk mining pipeline.
 """
 
+import json
 import sys
 from pathlib import Path
 
-# Add parent directory to path
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from trajdata import UnifiedDataset
-from trajdata.caching.df_cache import DataFrameCache
-
-from src.core import Slicer, Episode
-from src.rules import RuleRegistry, SpatialROIRule, TTCCriticalRule
+from src.core import Slicer
 from src.library import DualLibrary
+from src.rules import RuleRegistry, SpatialROIRule, TTCCriticalRule
 from src.utils import create_default_checker
 
 
-def test_sind_integration():
-    """
-    Integration test with SinD Tianjin dataset.
+class FakeState:
+    def __init__(self, position, velocity, acceleration=(0.0, 0.0), heading=0.0):
+        self.position = np.asarray(position, dtype=float)
+        self.velocity = np.asarray(velocity, dtype=float)
+        self.acceleration = np.asarray(acceleration, dtype=float)
+        self.heading = np.asarray([heading], dtype=float)
 
-    This test:
-    1. Loads the SinD Tianjin dataset
-    2. Extracts episodes from the first scene
-    3. Verifies episodes are created with valid SSTG
-    """
-    print("Setting up SinD integration test...")
 
-    # Configuration
-    data_dirs = {
-        "sind": "/home/lyw/datasets/SinD_dataset",
+class FakeExtent:
+    def __init__(self, length=4.5, width=2.0, height=1.5):
+        self.length = length
+        self.width = width
+        self.height = height
+
+    def get_extents(self, start_ts, end_ts):
+        return np.asarray([[self.length, self.width, self.height]], dtype=float)
+
+
+class FakeAgent:
+    def __init__(self, name, agent_type):
+        self.name = name
+        self.type = agent_type
+        self.extent = FakeExtent()
+
+
+class FakeAgentType:
+    def __init__(self, name):
+        self.name = name
+
+
+class FakeScene:
+    def __init__(self, agents, agent_presence):
+        self.env_name = "fake_env"
+        self.name = "fake_scene"
+        self.dt = 1.0
+        self.length_timesteps = len(agent_presence)
+        self.agents = agents
+        self.agent_presence = agent_presence
+
+
+class FakeCache:
+    def __init__(self, states):
+        self.states = states
+
+    def get_state(self, agent_id, scene_ts):
+        return self.states[(agent_id, scene_ts)]
+
+
+def test_end_to_end_pipeline_with_fake_scene(tmp_path):
+    ego = FakeAgent("ego", FakeAgentType("VEHICLE"))
+    other = FakeAgent("agent_1", FakeAgentType("VEHICLE"))
+    far = FakeAgent("agent_far", FakeAgentType("VEHICLE"))
+    agents = [ego, other, far]
+    agent_presence = [agents, agents, agents, agents, agents]
+    scene = FakeScene(agents, agent_presence)
+
+    states = {
+        ("ego", 0): FakeState((0.0, 0.0), (10.0, 0.0)),
+        ("agent_1", 0): FakeState((40.0, 0.0), (-5.0, 0.0)),
+        ("agent_far", 0): FakeState((200.0, 0.0), (0.0, 0.0)),
+        ("ego", 1): FakeState((10.0, 0.0), (10.0, 0.0)),
+        ("agent_1", 1): FakeState((25.0, 0.0), (-5.0, 0.0)),
+        ("agent_far", 1): FakeState((200.0, 0.0), (0.0, 0.0)),
+        ("ego", 2): FakeState((20.0, 0.0), (10.0, 0.0)),
+        ("agent_1", 2): FakeState((30.0, 0.0), (-10.0, 0.0)),
+        ("agent_far", 2): FakeState((200.0, 0.0), (0.0, 0.0)),
+        ("ego", 3): FakeState((30.0, 0.0), (10.0, 0.0)),
+        ("agent_1", 3): FakeState((20.0, 0.0), (-10.0, 0.0)),
+        ("agent_far", 3): FakeState((200.0, 0.0), (0.0, 0.0)),
+        ("ego", 4): FakeState((40.0, 0.0), (10.0, 0.0)),
+        ("agent_1", 4): FakeState((10.0, 0.0), (-10.0, 0.0)),
+        ("agent_far", 4): FakeState((200.0, 0.0), (0.0, 0.0)),
     }
+    cache = FakeCache(states)
 
-    try:
-        # Create dataset (just one scene for testing)
-        # Using sind-cqNR since it's cached (tj may not be)
-        dataset = UnifiedDataset(
-            desired_data=["sind-cqNR"],
-            data_dirs=data_dirs,
-            desired_dt=0.1,
-        )
-        print(f"✓ Dataset created: {dataset}")
-    except Exception as e:
-        print(f"✗ Failed to create dataset: {e}")
-        print("  (This is expected if SinD dataset is not available)")
-        return False
+    slicer = Slicer(pre_buffer_sec=2.0, post_buffer_sec=2.0)
+    episodes = slicer.extract_episodes(scene, cache)
+    assert len(episodes) == 1
 
-    # Get first scene
-    try:
-        scene = dataset.get_scene(0)
-        print(f"✓ Scene loaded: {scene.name}")
-        print(f"  - Timesteps: {scene.length_timesteps}")
-        print(f"  - Agents: {len(scene.agents)}")
-        print(f"  - dt: {scene.dt}")
-    except Exception as e:
-        print(f"✗ Failed to load scene: {e}")
-        return False
+    registry = RuleRegistry()
+    registry.register(SpatialROIRule(roi_radius=50.0))
+    registry.register(TTCCriticalRule(ttc_threshold=2.5))
 
-    # Create cache
-    cache_path = Path("~/.unified_data_cache").expanduser()
-    cache = DataFrameCache(cache_path, scene)
-    print(f"✓ Cache created")
-
-    # Create slicer
-    slicer = Slicer(
-        pre_buffer_sec=2.0,
-        post_buffer_sec=2.0,
-        ttc_threshold=3.0,
-    )
-
-    # Extract episodes
-    try:
-        episodes = slicer.extract_episodes(scene, cache)
-        print(f"✓ Episodes extracted: {len(episodes)}")
-    except Exception as e:
-        print(f"✗ Failed to extract episodes: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-    if len(episodes) == 0:
-        print("  (No episodes found - this may be expected for some scenes)")
-        return True
-
-    # Verify first episode
     episode = episodes[0]
-    print(f"\n  First episode:")
-    print(f"    - t_start: {episode.t_start}")
-    print(f"    - t_peak: {episode.t_peak}")
-    print(f"    - t_end: {episode.t_end}")
-    print(f"    - Agents: {len(episode.involved_agents)}")
-    print(f"    - Risk score: {episode.risk_score:.2f}")
-    print(f"    - Type: {episode.episode_type.value}")
+    episode.sstg = registry.apply_all(episode)
+    checker = create_default_checker(tmp_path)
+    validation = checker.validate_episode(episode)
+    assert validation.passed is True
 
-    # Check SSTG
-    if episode.sstg:
-        summary = episode.sstg.get_summary()
-        print(f"    - SSTG nodes: {summary['num_nodes']}")
-        print(f"    - SSTG edges: {summary['num_edges']}")
-
-    # Test sanity checker
-    output_dir = Path("./output/test")
-    checker = create_default_checker(output_dir)
-
-    check_result = checker.check_episode(episode)
-    print(f"\n  Sanity check: {'PASSED' if check_result.passed else 'FAILED'}")
-    if not check_result.passed:
-        print(f"    Reason: {check_result.reason}")
-
-    # Test dual library
-    dual_lib = DualLibrary(output_dir)
+    dual_lib = DualLibrary(tmp_path)
     element_id, event_id = dual_lib.add_episode(episode)
-    print(f"\n  Library:")
-    print(f"    - Element ID: {element_id}")
-    print(f"    - Event ID: {event_id}")
+    event_path = tmp_path / "libraries" / "risk_events" / f"{event_id}.json"
+    element_path = tmp_path / "libraries" / "risk_elements" / f"{element_id}.json"
 
-    print("\n✅ SinD integration test passed!")
-    return True
+    assert event_path.exists()
+    assert element_path.exists()
+
+    event_payload = json.loads(event_path.read_text())
+    assert event_payload["event_id"] == event_id
+    assert event_payload["sstg"]["scene_id"] == episode.scene_id
 
 
-def test_basic_workflow():
-    """Test basic workflow without real dataset."""
-    print("Testing basic workflow...")
-
-    from src.core import SSTG, Node, Edge, EdgeType
-
-    # Create a simple SSTG
-    sstg = SSTG(scene_id="test", dt=0.1)
-
-    # Add nodes
-    for i in range(3):
-        node = Node(
-            agent_id=f"agent_{i}",
-            agent_type="VEHICLE",
-            timestep=0,
-            position=(float(i * 10), 0.0),
-            velocity=(5.0, 0.0),
-            acceleration=(0.0, 0.0),
-            heading=0.0,
-            extent=(4.5, 2.0),
-        )
-        sstg.add_node(node)
-
-    # Add edge
-    edge = Edge(
-        source_id="agent_0",
-        target_id="agent_1",
-        edge_type=EdgeType.SPATIAL_PROXIMITY,
-        weight=0.5,
-        distance=10.0,
+def test_failed_graph_goes_to_manual_review(tmp_path):
+    checker = create_default_checker(tmp_path)
+    episode = Slicer().extract_episodes(
+        FakeScene(
+            [FakeAgent("ego", FakeAgentType("VEHICLE")), FakeAgent("agent_1", FakeAgentType("VEHICLE"))],
+            [
+                [FakeAgent("ego", FakeAgentType("VEHICLE")), FakeAgent("agent_1", FakeAgentType("VEHICLE"))],
+                [FakeAgent("ego", FakeAgentType("VEHICLE")), FakeAgent("agent_1", FakeAgentType("VEHICLE"))],
+                [FakeAgent("ego", FakeAgentType("VEHICLE")), FakeAgent("agent_1", FakeAgentType("VEHICLE"))],
+            ],
+        ),
+        FakeCache(
+            {
+                ("ego", 0): FakeState((0.0, 0.0), (0.0, 0.0)),
+                ("agent_1", 0): FakeState((50.0, 0.0), (0.0, 0.0)),
+                ("ego", 1): FakeState((0.0, 0.0), (0.0, 0.0)),
+                ("agent_1", 1): FakeState((50.0, 0.0), (0.0, 0.0)),
+                ("ego", 2): FakeState((0.0, 0.0), (0.0, 0.0)),
+                ("agent_1", 2): FakeState((50.0, 0.0), (0.0, 0.0)),
+            }
+        ),
     )
-    sstg.add_edge(edge, timestep=0)
 
-    # Test serialization
-    data = sstg.to_dict()
-    sstg2 = SSTG.from_dict(data)
+    assert episode == []
 
-    assert sstg2.scene_id == sstg.scene_id
-    assert sstg2.dt == sstg.dt
+    # Build a graph with no causal edge to exercise manual review dump directly.
+    from src.core import Episode, EpisodeType, Node, SSTG
 
-    print("✓ Basic workflow test passed")
-    return True
+    manual_episode = Episode(
+        scene_id="fake_env:manual",
+        scene_name="manual",
+        env_name="fake_env",
+        dt=1.0,
+        ego_agent_id="ego",
+        t_start=0,
+        t_peak=1,
+        t_end=2,
+        involved_agents=["ego", "agent_1"],
+        episode_type=EpisodeType.TTC_MIN_WINDOW,
+        state_snapshots={
+            "T_peak": {
+                "ego": Node("ego", "T_peak", "VEHICLE", (0.0, 0.0), (0.0, 0.0), position=(0.0, 0.0)),
+                "agent_1": Node("agent_1", "T_peak", "VEHICLE", (0.0, 0.0), (0.0, 0.0), position=(20.0, 0.0)),
+            }
+        },
+    )
+    manual_episode.sstg = SSTG(scene_id=manual_episode.scene_id, dt=manual_episode.dt)
+    manual_episode.sstg.add_node(manual_episode.state_snapshots["T_peak"]["ego"])
+    manual_episode.sstg.add_node(manual_episode.state_snapshots["T_peak"]["agent_1"])
 
-
-if __name__ == "__main__":
-    print("=" * 60)
-    print("Integration Tests")
-    print("=" * 60)
-
-    # Test basic workflow first
-    test_basic_workflow()
-
-    print()
-    print("=" * 60)
-
-    # Try SinD integration test
-    success = test_sind_integration()
-
-    if success:
-        print("\n" + "=" * 60)
-        print("All integration tests passed!")
-        print("=" * 60)
-    else:
-        print("\n" + "=" * 60)
-        print("SinD integration test skipped (dataset not available)")
-        print("=" * 60)
+    validation = checker.validate_episode(manual_episode)
+    assert validation.passed is False
+    review_path = checker.save_for_review(manual_episode, validation)
+    assert review_path.exists()

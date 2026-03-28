@@ -1,682 +1,651 @@
 #!/usr/bin/env python
 """
-Visualize extracted risk episodes from the risk mining pipeline.
-
-Usage:
-    python visualize_episode.py --event-id event_8a854095
-    python visualize_episode.py --list  # List all available events
+Bokeh-based interactive visualization for mined risk events.
 """
 
+from __future__ import annotations
+
 import argparse
-import pickle
+import json
+import math
 import sys
 from pathlib import Path
-from typing import List, Tuple, Dict, Set
+from typing import Any, Dict, List, Tuple
+
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.animation import FuncAnimation
-import networkx as nx
+from bokeh.layouts import column, row
+from bokeh.models import CheckboxGroup, ColumnDataSource, CustomJS, Div, HoverTool, Select
+from bokeh.plotting import figure, output_file, save
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent))
 
-from src.core import SSTG, Node, Edge, EdgeType, Episode
+from trajdata import MapAPI
+from trajdata.data_structures.agent import AgentType
+from trajdata.utils import vis_utils
 
 
-# Agent type colors
-AGENT_COLORS = {
-    "VEHICLE": "#3498db",      # Blue
-    "PEDESTRIAN": "#e74c3c",   # Red
-    "BICYCLE": "#2ecc71",      # Green
-    "MOTORCYCLE": "#f39c12",   # Orange
-    "OTHER": "#95a5a6",        # Gray
-}
+TIMESTAMPS = ["T_start", "T_peak", "T_end"]
+EDGE_TYPES = ["spatial", "temporal", "causal"]
+MAP_LAYERS = ["road_areas", "road_lanes", "crosswalks", "walkways", "lane_centers"]
 
-# Agent type markers
-AGENT_MARKERS = {
-    "VEHICLE": "s",           # Square
-    "PEDESTRIAN": "o",        # Circle
-    "BICYCLE": "^",           # Triangle
-    "MOTORCYCLE": "D",        # Diamond
-    "OTHER": "x",             # X
-}
-
-# Edge type colors
 EDGE_COLORS = {
-    EdgeType.SPATIAL_PROXIMITY: "#bdc3c7",  # Light gray
-    EdgeType.LEAD_FOLLOW: "#3498db",        # Blue
-    EdgeType.CROSSING_PATH: "#e74c3c",      # Red
-    EdgeType.CONFLICT_LANE: "#f39c12",      # Orange
-    EdgeType.INTERACTION: "#9b59b6",        # Purple
+    "spatial": "#8d99ae",
+    "temporal": "#457b9d",
+    "causal": "#d62828",
 }
 
-# Edge type display names
-EDGE_TYPE_NAMES = {
-    EdgeType.SPATIAL_PROXIMITY: "Spatial Proximity",
-    EdgeType.LEAD_FOLLOW: "Lead-Follow",
-    EdgeType.CROSSING_PATH: "Crossing Path",
-    EdgeType.CONFLICT_LANE: "Conflict Lane",
-    EdgeType.INTERACTION: "Interaction",
+AGENT_COLOR_BY_NAME = {
+    "VEHICLE": vis_utils.get_agent_type_color(AgentType.VEHICLE),
+    "PEDESTRIAN": vis_utils.get_agent_type_color(AgentType.PEDESTRIAN),
+    "BICYCLE": vis_utils.get_agent_type_color(AgentType.BICYCLE),
+    "MOTORCYCLE": vis_utils.get_agent_type_color(AgentType.MOTORCYCLE),
+    "UNKNOWN": "#7a7a7a",
 }
 
 
-def load_episode(event_dir: Path, event_id: str) -> Episode:
-    """Load an episode from the library."""
-    event_path = event_dir / f"{event_id}.pkl"
-    with open(event_path, 'rb') as f:
-        return pickle.load(f)
+def list_events(element_dir: Path) -> List[Dict]:
+    index_path = element_dir / "index.json"
+    if not index_path.exists():
+        return []
+    with open(index_path, "r", encoding="utf-8") as handle:
+        return json.load(handle).get("elements", [])
 
 
-def list_events(element_dir: Path, event_dir: Path) -> List[Dict]:
-    """List all available events."""
-    # Load element index
-    element_index_path = element_dir / "index.json"
-    if element_index_path.exists():
-        import json
-        with open(element_index_path, 'r') as f:
-            element_index = json.load(f)
-        return element_index.get("elements", [])
-    return []
+def load_events(event_dir: Path) -> Dict[str, Dict]:
+    events: Dict[str, Dict] = {}
+    for event_path in sorted(event_dir.glob("event_*.json")):
+        with open(event_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        events[payload["event_id"]] = payload
+    return events
 
 
-def filter_stationary_agents(sstg: SSTG, min_avg_speed: float = 0.5, min_displacement: float = 5.0) -> Set[str]:
-    """
-    Filter out stationary vehicles.
+def _to_list_dict(data: Dict[str, Any]) -> Dict[str, List]:
+    return {key: value.tolist() if hasattr(value, "tolist") else value for key, value in data.items()}
 
-    Args:
-        sstg: The SSTG to filter
-        min_avg_speed: Minimum average speed threshold (m/s)
-        min_displacement: Minimum total displacement threshold (m)
 
-    Returns:
-        Set of agent IDs to exclude (stationary agents)
-    """
-    stationary_agents = set()
+def _normalize_xy_data(data: Dict[str, Any]) -> Dict[str, List]:
+    normalized = _to_list_dict(data)
+    normalized.setdefault("xs", [])
+    normalized.setdefault("ys", [])
+    return normalized
 
-    for agent_id in sstg.graph.nodes():
-        # Get all nodes for this agent
-        agent_nodes = sstg.get_agent_states(agent_id)
-        if len(agent_nodes) < 2:
+
+def _agent_type_from_name(type_name: str) -> int:
+    try:
+        return int(AgentType[type_name])
+    except Exception:
+        return int(AgentType.UNKNOWN)
+
+
+def _infer_map_id(raw_event: Dict) -> str | None:
+    env_name = raw_event["source_scene"]["env_name"]
+    scene_name = raw_event["source_scene"]["scene_name"]
+    if env_name == "sind":
+        location = scene_name.split("_", 1)[0]
+        return f"{env_name}:{location}"
+    return None
+
+
+def _compute_bbox(raw_event: Dict, margin: float = 60.0) -> Tuple[float, float, float, float]:
+    xs: List[float] = []
+    ys: List[float] = []
+    for node_entry in raw_event["sstg"]["nodes"]:
+        pos = node_entry["data"].get("position")
+        if pos is not None:
+            xs.append(pos[0])
+            ys.append(pos[1])
+    if not xs:
+        return (-50.0, 50.0, -50.0, 50.0)
+    return (min(xs) - margin, max(xs) + margin, min(ys) - margin, max(ys) + margin)
+
+
+def _build_map_payload(raw_event: Dict, cache_path: Path) -> Dict[str, Dict[str, List]]:
+    empty = {layer: {"xs": [], "ys": []} for layer in MAP_LAYERS}
+    map_id = _infer_map_id(raw_event)
+    if map_id is None:
+        return empty
+
+    try:
+        map_api = MapAPI(cache_path, keep_in_memory=True)
+        vec_map = map_api.get_map(
+            map_id,
+            incl_road_lanes=True,
+            incl_road_areas=True,
+            incl_ped_crosswalks=True,
+            incl_ped_walkways=True,
+        )
+        cds_tuple = vis_utils.get_map_cds(np.eye(3), vec_map, bbox=_compute_bbox(raw_event))
+    except Exception:
+        return empty
+
+    return {
+        "lane_centers": _normalize_xy_data(cds_tuple[0].data),
+        "road_lanes": _normalize_xy_data(cds_tuple[1].data),
+        "crosswalks": _normalize_xy_data(cds_tuple[2].data),
+        "walkways": _normalize_xy_data(cds_tuple[3].data),
+        "road_areas": _normalize_xy_data(cds_tuple[4].data),
+    }
+
+
+def _build_agent_geometry(node: Dict[str, Any]) -> Tuple[List[float], List[float], List[float], List[float]]:
+    position = node.get("position")
+    if position is None:
+        return [], [], [], []
+
+    extent = node.get("extent") or [4.3, 1.8, 1.5]
+    length = float(extent[0]) if len(extent) > 0 else 4.3
+    width = float(extent[1]) if len(extent) > 1 else 1.8
+    heading = float(node.get("heading") or 0.0)
+    agent_type = _agent_type_from_name(node["type"])
+
+    rect_coords, dir_coords = vis_utils.compute_agent_rect_coords(
+        agent_type,
+        heading,
+        length,
+        width,
+    )
+    rect_xs = (rect_coords[:, 0] + position[0]).tolist()
+    rect_ys = (rect_coords[:, 1] + position[1]).tolist()
+    dir_xs = (dir_coords[:, 0] + position[0]).tolist()
+    dir_ys = (dir_coords[:, 1] + position[1]).tolist()
+    return rect_xs, rect_ys, dir_xs, dir_ys
+
+
+def _build_event_payload(raw_event: Dict) -> Dict[str, Any]:
+    node_lookup: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    nodes_by_timestamp: Dict[str, List[Dict[str, Any]]] = {label: [] for label in TIMESTAMPS}
+    trajectories: Dict[str, Dict[str, Any]] = {}
+
+    for node_entry in raw_event["sstg"]["nodes"]:
+        node = node_entry["data"]
+        timestamp = node["timestamp"]
+        rect_xs, rect_ys, dir_xs, dir_ys = _build_agent_geometry(node)
+        record = {
+            "agent_id": node["agent_id"],
+            "type": node["type"],
+            "timestamp": timestamp,
+            "x": node["position"][0] if node.get("position") else None,
+            "y": node["position"][1] if node.get("position") else None,
+            "vx": node["velocity"][0],
+            "vy": node["velocity"][1],
+            "ax": node["acceleration"][0],
+            "ay": node["acceleration"][1],
+            "heading": node.get("heading"),
+            "raw_timestep": node.get("metadata", {}).get("raw_timestep"),
+            "fill_color": AGENT_COLOR_BY_NAME.get(node["type"], AGENT_COLOR_BY_NAME["UNKNOWN"]),
+            "line_color": "black",
+            "fill_alpha": 0.85 if node["agent_id"] == raw_event["ego_agent_id"] else 0.65,
+            "speed_mps": float(np.linalg.norm(np.asarray(node["velocity"], dtype=float))),
+            "speed_kph": float(np.linalg.norm(np.asarray(node["velocity"], dtype=float)) * 3.6),
+            "xs": rect_xs,
+            "ys": rect_ys,
+            "dir_xs": dir_xs,
+            "dir_ys": dir_ys,
+        }
+        nodes_by_timestamp[timestamp].append(record)
+        node_lookup[(node["agent_id"], timestamp)] = record
+
+        trajectory = trajectories.setdefault(
+            node["agent_id"],
+            {
+                "xs": [],
+                "ys": [],
+                "line_color": AGENT_COLOR_BY_NAME.get(node["type"], AGENT_COLOR_BY_NAME["UNKNOWN"]),
+                "agent_id": node["agent_id"],
+                "type": node["type"],
+            },
+        )
+        if node.get("position") is not None:
+            trajectory["xs"].append(node["position"][0])
+            trajectory["ys"].append(node["position"][1])
+
+    edges_by_timestamp: Dict[str, Dict[str, List[Dict[str, Any]]]] = {
+        label: {edge_type: [] for edge_type in EDGE_TYPES} for label in TIMESTAMPS
+    }
+    for edge_entry in raw_event["sstg"]["edges"]:
+        edge = edge_entry["data"]
+        source = node_lookup.get((edge["source_id"], edge["source_timestamp"]))
+        target = node_lookup.get((edge["target_id"], edge["target_timestamp"]))
+        if source is None or target is None:
             continue
+        edge_record = {
+            "x0": source["x"],
+            "y0": source["y"],
+            "x1": target["x"],
+            "y1": target["y"],
+            "source_id": edge["source_id"],
+            "target_id": edge["target_id"],
+            "relation": edge.get("relation") or "",
+            "weight": float(edge.get("weight", 1.0)),
+            "color": EDGE_COLORS[edge["edge_type"]],
+            "line_width": max(1.5, float(edge.get("weight", 1.0)) * 4.0),
+            "edge_type": edge["edge_type"],
+            "timestamp_pair": f"{edge['source_timestamp']} -> {edge['target_timestamp']}",
+            "details": json.dumps(edge.get("metadata", {}), ensure_ascii=False),
+        }
+        for timestamp in {edge["source_timestamp"], edge["target_timestamp"]}:
+            if timestamp in edges_by_timestamp:
+                edges_by_timestamp[timestamp][edge["edge_type"]].append(edge_record)
 
-        # Calculate average speed
-        speeds = [node.speed for node in agent_nodes]
-        avg_speed = np.mean(speeds)
-
-        # Calculate total displacement
-        if len(agent_nodes) >= 2:
-            start_pos = np.array(agent_nodes[0].position)
-            end_pos = np.array(agent_nodes[-1].position)
-            displacement = np.linalg.norm(end_pos - start_pos)
-        else:
-            displacement = 0
-
-        # Check if stationary (low speed AND low displacement)
-        if avg_speed < min_avg_speed and displacement < min_displacement:
-            stationary_agents.add(agent_id)
-
-    return stationary_agents
+    return {
+        "event_id": raw_event["event_id"],
+        "scene_name": raw_event["source_scene"]["scene_name"],
+        "env_name": raw_event["source_scene"]["env_name"],
+        "ego_agent_id": raw_event["ego_agent_id"],
+        "risk_score": raw_event["risk_score"],
+        "episode_type": raw_event["episode_type"],
+        "applied_rules": raw_event.get("applied_rules", []),
+        "episode_window": raw_event["episode_window"],
+        "nodes_by_timestamp": nodes_by_timestamp,
+        "edges_by_timestamp": edges_by_timestamp,
+        "trajectories": list(trajectories.values()),
+        "bbox": _compute_bbox(raw_event, margin=30.0),
+    }
 
 
-def plot_edge_type_subplots(episode: Episode, stationary_agents: Set[str], save_path: Path = None):
-    """
-    Create separate subplots for each edge type at t_peak.
+def _columns_from_records(records: List[Dict[str, Any]], fields: List[str]) -> Dict[str, List]:
+    return {field: [record.get(field) for record in records] for field in fields}
 
-    Each subplot shows only the edges of a specific type.
-    """
-    if episode.sstg is None:
-        print("No SSTG data available for visualization")
-        return
 
-    sstg = episode.sstg
-    nodes_at_peak = sstg.get_nodes_at_timestep(episode.t_peak)
-    edges_at_peak = sstg.get_edges_at_timestep(episode.t_peak)
-
-    # Filter out stationary agents
-    active_nodes = [n for n in nodes_at_peak if n.agent_id not in stationary_agents]
-    active_agent_ids = {n.agent_id for n in active_nodes}
-
-    # Group edges by type
-    edges_by_type: Dict[EdgeType, List[Edge]] = {et: [] for et in EdgeType}
-    for edge in edges_at_peak:
-        # Only include edges involving active agents
-        if edge.source_id in active_agent_ids and edge.target_id in active_agent_ids:
-            edges_by_type[edge.edge_type].append(edge)
-
-    # Create subplots for each edge type
-    num_edge_types = len(EdgeType)
-    ncols = 3
-    nrows = (num_edge_types + ncols - 1) // ncols
-
-    fig, axes = plt.subplots(nrows, ncols, figsize=(18, 12))
-    fig.suptitle(
-        f"Edge Type Analysis at t_peak={episode.t_peak}\n"
-        f"Episode: {episode.metadata.get('scene_name', 'Unknown')} | "
-        f"Risk Score: {episode.risk_score:.2f}\n"
-        f"Filtered {len(stationary_agents)} stationary agents",
-        fontsize=14
+def _build_info_html(event_payload: Dict[str, Any], timestamp: str) -> str:
+    window = event_payload["episode_window"]
+    return (
+        f"<b>Event</b>: {event_payload['event_id']}<br>"
+        f"<b>Scene</b>: {event_payload['scene_name']} ({event_payload['env_name']})<br>"
+        f"<b>Ego</b>: {event_payload['ego_agent_id']}<br>"
+        f"<b>Episode Type</b>: {event_payload['episode_type']}<br>"
+        f"<b>Risk Score</b>: {event_payload['risk_score']:.4f}<br>"
+        f"<b>Timestamp</b>: {timestamp}<br>"
+        f"<b>Window</b>: T_start={window['T_start']}, T_peak={window['T_peak']}, T_end={window['T_end']}<br>"
+        f"<b>Rules</b>: {', '.join(event_payload['applied_rules'])}"
     )
 
-    # Flatten axes for easier iteration
-    axes_flat = axes.flatten() if nrows > 1 else ([axes] if ncols == 1 else axes)
 
-    for idx, edge_type in enumerate(EdgeType):
-        ax = axes_flat[idx]
-        edges = edges_by_type[edge_type]
+def create_interactive_document(events: Dict[str, Dict], initial_event_id: str):
+    cache_path = Path.home() / ".unified_data_cache"
+    event_payloads = {event_id: _build_event_payload(payload) for event_id, payload in events.items()}
+    map_payloads = {event_id: _build_map_payload(payload, cache_path) for event_id, payload in events.items()}
+    current_payload = event_payloads[initial_event_id]
+    current_timestamp = "T_peak"
 
-        ax.set_title(f"{EDGE_TYPE_NAMES[edge_type]} ({len(edges)} edges)")
-        ax.set_xlabel("X (m)")
-        ax.set_ylabel("Y (m)")
-        ax.grid(True, alpha=0.3)
-        ax.set_aspect('equal')
-
-        # Draw all active nodes
-        for node in active_nodes:
-            color = AGENT_COLORS.get(node.agent_type, "#95a5a6")
-            marker = AGENT_MARKERS.get(node.agent_type, "o")
-            ax.plot(
-                node.position[0], node.position[1],
-                marker=marker, color=color, markersize=8,
-                markeredgecolor='black', markeredgewidth=0.5,
-                alpha=0.7
-            )
-
-        # Draw edges of this type
-        edge_color = EDGE_COLORS[edge_type]
-        for edge in edges:
-            source_node = next((n for n in active_nodes if n.agent_id == edge.source_id), None)
-            target_node = next((n for n in active_nodes if n.agent_id == edge.target_id), None)
-
-            if source_node and target_node:
-                # Line width based on weight
-                lw = max(0.5, edge.weight * 3)
-                ax.plot(
-                    [source_node.position[0], target_node.position[0]],
-                    [source_node.position[1], target_node.position[1]],
-                    '-', color=edge_color, alpha=0.7, linewidth=lw
-                )
-
-                # Draw arrow if interaction
-                if edge_type == EdgeType.INTERACTION or edge_type == EdgeType.LEAD_FOLLOW:
-                    mid_x = (source_node.position[0] + target_node.position[0]) / 2
-                    mid_y = (source_node.position[1] + target_node.position[1]) / 2
-                    ax.annotate(
-                        '', xy=(target_node.position[0], target_node.position[1]),
-                        xytext=(source_node.position[0], source_node.position[1]),
-                        arrowprops=dict(arrowstyle='->', color=edge_color, lw=lw, alpha=0.5)
-                    )
-
-    # Hide empty subplots
-    for idx in range(num_edge_types, len(axes_flat)):
-        axes_flat[idx].axis('off')
-
-    # Add legend
-    legend_elements = [
-        plt.Line2D([0], [0], marker='s', color='w', label='Vehicle',
-                  markerfacecolor=AGENT_COLORS['VEHICLE'], markersize=10),
-        plt.Line2D([0], [0], marker='o', color='w', label='Pedestrian',
-                  markerfacecolor=AGENT_COLORS['PEDESTRIAN'], markersize=10),
-        plt.Line2D([0], [0], marker='^', color='w', label='Bicycle',
-                  markerfacecolor=AGENT_COLORS['BICYCLE'], markersize=10),
+    rect_fields = [
+        "xs",
+        "ys",
+        "agent_id",
+        "type",
+        "speed_mps",
+        "speed_kph",
+        "heading",
+        "raw_timestep",
+        "fill_color",
+        "line_color",
+        "fill_alpha",
+        "x",
+        "y",
     ]
-    fig.legend(handles=legend_elements, loc='lower center', ncol=3, bbox_to_anchor=(0.5, -0.02))
+    dir_fields = ["xs", "ys", "fill_color", "line_color", "fill_alpha"]
+    edge_fields = ["x0", "y0", "x1", "y1", "source_id", "target_id", "relation", "weight", "color", "line_width", "edge_type", "timestamp_pair", "details"]
+    traj_fields = ["xs", "ys", "line_color", "agent_id", "type"]
 
-    plt.tight_layout()
+    rect_source = ColumnDataSource(_columns_from_records(current_payload["nodes_by_timestamp"][current_timestamp], rect_fields))
+    dir_source = ColumnDataSource(
+        {
+            "xs": [record["dir_xs"] for record in current_payload["nodes_by_timestamp"][current_timestamp]],
+            "ys": [record["dir_ys"] for record in current_payload["nodes_by_timestamp"][current_timestamp]],
+            "fill_color": [record["fill_color"] for record in current_payload["nodes_by_timestamp"][current_timestamp]],
+            "line_color": [record["line_color"] for record in current_payload["nodes_by_timestamp"][current_timestamp]],
+            "fill_alpha": [record["fill_alpha"] for record in current_payload["nodes_by_timestamp"][current_timestamp]],
+        }
+    )
+    edge_sources = {
+        edge_type: ColumnDataSource(_columns_from_records(current_payload["edges_by_timestamp"][current_timestamp][edge_type], edge_fields))
+        for edge_type in EDGE_TYPES
+    }
+    traj_source = ColumnDataSource(_columns_from_records(current_payload["trajectories"], traj_fields))
+    map_sources = {layer: ColumnDataSource(map_payloads[initial_event_id][layer]) for layer in MAP_LAYERS}
 
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Saved edge type subplots to: {save_path}")
+    x_min, x_max, y_min, y_max = current_payload["bbox"]
+    plot = figure(
+        title="Risk Event Graph",
+        width=1080,
+        height=780,
+        tools="pan,wheel_zoom,box_zoom,reset,save",
+        active_scroll="wheel_zoom",
+        x_range=(x_min, x_max),
+        y_range=(y_min, y_max),
+        match_aspect=True,
+        output_backend="canvas",
+    )
+    vis_utils.apply_default_settings(plot)
+    plot.background_fill_color = "#ffffff"
 
-    plt.show()
+    map_renderers = {
+        "road_areas": plot.multi_polygons(
+            xs="xs",
+            ys="ys",
+            source=map_sources["road_areas"],
+            line_color="black",
+            line_width=0.3,
+            fill_alpha=0.1,
+            fill_color=vis_utils.get_map_patch_color(2),
+        ),
+        "road_lanes": plot.patches(
+            xs="xs",
+            ys="ys",
+            source=map_sources["road_lanes"],
+            line_color="black",
+            line_width=0.3,
+            fill_alpha=0.12,
+            fill_color=vis_utils.get_map_patch_color(1),
+        ),
+        "crosswalks": plot.patches(
+            xs="xs",
+            ys="ys",
+            source=map_sources["crosswalks"],
+            line_color="black",
+            line_width=0.3,
+            fill_alpha=0.5,
+            fill_color=vis_utils.get_map_patch_color(3),
+        ),
+        "walkways": plot.patches(
+            xs="xs",
+            ys="ys",
+            source=map_sources["walkways"],
+            line_color="black",
+            line_width=0.3,
+            fill_alpha=0.25,
+            fill_color=vis_utils.get_map_patch_color(4),
+        ),
+        "lane_centers": plot.multi_line(
+            xs="xs",
+            ys="ys",
+            source=map_sources["lane_centers"],
+            line_color="gray",
+            line_alpha=0.5,
+            line_width=1.2,
+        ),
+    }
 
-
-def plot_episode_static(episode: Episode, stationary_agents: Set[str], save_path: Path = None):
-    """
-    Create a static visualization of the episode.
-
-    Shows:
-    - Trajectories of all involved agents (excluding stationary)
-    - Agent positions at t_peak
-    - Velocity vectors
-    """
-    if episode.sstg is None:
-        print("No SSTG data available for visualization")
-        return
-
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle(
-        f"Risk Episode: {episode.metadata.get('scene_name', 'Unknown')}\n"
-        f"Type: {episode.episode_type.value} | Risk Score: {episode.risk_score:.2f}\n"
-        f"t_start={episode.t_start} | t_peak={episode.t_peak} | t_end={episode.t_end}\n"
-        f"Filtered {len(stationary_agents)} stationary agents",
-        fontsize=14
+    traj_renderer = plot.multi_line(
+        xs="xs",
+        ys="ys",
+        source=traj_source,
+        line_color="line_color",
+        line_dash="dashed",
+        line_width=2,
+        line_alpha=0.65,
     )
 
-    sstg = episode.sstg
-
-    # Plot 1: Trajectories (top-left)
-    ax1 = axes[0, 0]
-    ax1.set_title("Agent Trajectories (Non-stationary)")
-    ax1.set_xlabel("X (m)")
-    ax1.set_ylabel("Y (m)")
-    ax1.grid(True, alpha=0.3)
-    ax1.set_aspect('equal')
-
-    # Group nodes by agent (exclude stationary)
-    agent_trajectories: Dict[str, List[Tuple[float, float, float]]] = {}
-    for node in sstg.get_nodes_at_timestep(episode.t_peak):
-        if node.agent_id in stationary_agents:
-            continue
-        agent_id = node.agent_id
-        if agent_id not in agent_trajectories:
-            # Get full trajectory
-            agent_nodes = sstg.get_agent_states(agent_id)
-            agent_trajectories[agent_id] = [
-                (n.position[0], n.position[1], float(n.heading))
-                for n in agent_nodes
-            ]
-
-    # Plot trajectories
-    for agent_id, traj in agent_trajectories.items():
-        if not traj:
-            continue
-        xs, ys, hs = zip(*traj)
-        agent_node = sstg.get_agent_states(agent_id)[0]
-        agent_type = agent_node.agent_type
-        color = AGENT_COLORS.get(agent_type, "#95a5a6")
-        ax1.plot(xs, ys, '-', color=color, alpha=0.6, linewidth=1)
-
-        # Mark t_peak position
-        ax1.plot(xs[-1], ys[-1], marker='o', color=color, markersize=8)
-
-        # Velocity vector at t_peak
-        peak_node = sstg.get_agent_states(agent_id)[-1]
-        vx, vy = peak_node.velocity
-        ax1.arrow(
-            xs[-1], ys[-1], vx*0.5, vy*0.5,
-            head_width=2, head_length=2, fc=color, ec=color, alpha=0.8
+    edge_renderers = {
+        edge_type: plot.segment(
+            x0="x0",
+            y0="y0",
+            x1="x1",
+            y1="y1",
+            source=edge_sources[edge_type],
+            line_color="color",
+            line_width="line_width",
+            line_alpha=0.9,
+            line_dash="dashed" if edge_type == "temporal" else "solid",
         )
+        for edge_type in EDGE_TYPES
+    }
 
-    # Plot 2: SSTG at t_peak (top-right)
-    ax2 = axes[0, 1]
-    ax2.set_title(f"SSTG at t_peak={episode.t_peak} (All Edge Types)")
-    ax2.set_xlabel("X (m)")
-    ax2.set_ylabel("Y (m)")
-    ax2.grid(True, alpha=0.3)
-    ax2.set_aspect('equal')
+    rect_renderer = plot.patches(
+        xs="xs",
+        ys="ys",
+        source=rect_source,
+        fill_color="fill_color",
+        fill_alpha="fill_alpha",
+        line_color="line_color",
+        line_width=1.0,
+    )
+    dir_renderer = plot.patches(
+        xs="xs",
+        ys="ys",
+        source=dir_source,
+        fill_color="fill_color",
+        fill_alpha="fill_alpha",
+        line_color="line_color",
+        line_width=0.8,
+    )
 
-    nodes_at_peak = [n for n in sstg.get_nodes_at_timestep(episode.t_peak)
-                     if n.agent_id not in stationary_agents]
-    edges_at_peak = sstg.get_edges_at_timestep(episode.t_peak)
-
-    # Filter edges to only include active agents
-    active_ids = {n.agent_id for n in nodes_at_peak}
-    edges_at_peak = [e for e in edges_at_peak
-                     if e.source_id in active_ids and e.target_id in active_ids]
-
-    # Draw edges first (so nodes are on top)
-    for edge in edges_at_peak:
-        source_node = next((n for n in nodes_at_peak if n.agent_id == edge.source_id), None)
-        target_node = next((n for n in nodes_at_peak if n.agent_id == edge.target_id), None)
-
-        if source_node and target_node:
-            edge_color = EDGE_COLORS.get(edge.edge_type, "#bdc3c7")
-            alpha = 0.3 if edge.edge_type == EdgeType.SPATIAL_PROXIMITY else 0.6
-            ax2.plot(
-                [source_node.position[0], target_node.position[0]],
-                [source_node.position[1], target_node.position[1]],
-                '-', color=edge_color, alpha=alpha, linewidth=1
+    plot.add_tools(
+        HoverTool(
+            renderers=[rect_renderer],
+            tooltips=[
+                ("agent", "@agent_id"),
+                ("type", "@type"),
+                ("position", "(@x{0.00}, @y{0.00})"),
+                ("speed", "@speed_mps{0.00} m/s (@speed_kph{0.0} km/h)"),
+                ("heading", "@heading{0.000}"),
+                ("raw_timestep", "@raw_timestep"),
+            ],
+        )
+    )
+    plot.add_tools(
+        HoverTool(
+            renderers=[traj_renderer],
+            tooltips=[("agent", "@agent_id"), ("type", "@type")],
+        )
+    )
+    for edge_type, renderer in edge_renderers.items():
+        plot.add_tools(
+            HoverTool(
+                renderers=[renderer],
+                tooltips=[
+                    ("edge_type", edge_type),
+                    ("agents", "@source_id -> @target_id"),
+                    ("relation", "@relation"),
+                    ("weight", "@weight{0.000}"),
+                    ("timestamps", "@timestamp_pair"),
+                    ("details", "@details"),
+                ],
             )
-
-    # Draw nodes
-    for node in nodes_at_peak:
-        color = AGENT_COLORS.get(node.agent_type, "#95a5a6")
-        ax2.plot(
-            node.position[0], node.position[1],
-            marker='o', color=color, markersize=10,
-            markeredgecolor='black', markeredgewidth=0.5
-        )
-        ax2.text(
-            node.position[0], node.position[1] + 2,
-            node.agent_id, fontsize=6, ha='center'
         )
 
-    # Add edge legend
-    for edge_type, color in EDGE_COLORS.items():
-        ax2.plot([], [], '-', color=color, label=EDGE_TYPE_NAMES[edge_type], linewidth=2)
-    ax2.legend(fontsize=6, loc='upper right')
-
-    # Plot 3: Speed profiles over time (bottom-left)
-    ax3 = axes[1, 0]
-    ax3.set_title("Agent Speeds Over Time (Non-stationary)")
-    ax3.set_xlabel("Timestep")
-    ax3.set_ylabel("Speed (m/s)")
-    ax3.grid(True, alpha=0.3)
-
-    active_agents = [aid for aid in episode.involved_agents if aid not in stationary_agents]
-    for agent_id in active_agents[:10]:  # Limit to 10 agents
-        agent_nodes = sstg.get_agent_states(agent_id)
-        if not agent_nodes:
-            continue
-        timesteps = [n.timestep for n in agent_nodes]
-        speeds = [n.speed for n in agent_nodes]
-        agent_node = agent_nodes[0]
-        agent_type = agent_node.agent_type
-        color = AGENT_COLORS.get(agent_type, "#95a5a6")
-        ax3.plot(timesteps, speeds, '-', color=color, alpha=0.7, linewidth=1, label=agent_id)
-
-    ax3.legend(fontsize=6, ncol=2)
-
-    # Plot 4: Edge statistics (bottom-right)
-    ax4 = axes[1, 1]
-    ax4.set_title("Edge Type Distribution")
-
-    # Count edge types across all timesteps (filtered)
-    edge_counts: Dict[str, int] = {}
-    for ts in sstg.timesteps:
-        for edge in sstg.get_edges_at_timestep(ts):
-            if edge.source_id in active_ids and edge.target_id in active_ids:
-                edge_type = edge.edge_type.value
-                edge_counts[edge_type] = edge_counts.get(edge_type, 0) + 1
-
-    if edge_counts:
-        edge_types = list(edge_counts.keys())
-        counts = list(edge_counts.values())
-        colors = [EDGE_COLORS.get(EdgeType(et), "#bdc3c7") for et in edge_types]
-
-        bars = ax4.bar(edge_types, counts, color=colors, alpha=0.7, edgecolor='black')
-        ax4.set_ylabel("Count")
-        ax4.set_xlabel("Edge Type")
-        ax4.tick_params(axis='x', rotation=45)
-
-        # Add value labels on bars
-        for bar, count in zip(bars, counts):
-            ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 10,
-                    str(count), ha='center', va='bottom', fontsize=9)
-
-    plt.tight_layout()
-
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Saved visualization to: {save_path}")
-
-    plt.show()
-
-
-def plot_interactions_graph(episode: Episode, stationary_agents: Set[str], save_path: Path = None):
-    """Plot the interaction graph at t_peak."""
-    if episode.sstg is None:
-        print("No SSTG data available for visualization")
-        return
-
-    fig, ax = plt.subplots(figsize=(14, 10))
-    ax.set_title(
-        f"Interaction Graph at t_peak={episode.t_peak}\n"
-        f"Episode: {episode.metadata.get('scene_name', 'Unknown')} | "
-        f"Risk Score: {episode.risk_score:.2f}\n"
-        f"Filtered {len(stationary_agents)} stationary agents"
+    info_div = Div(text=_build_info_html(current_payload, current_timestamp), width=360, height=180)
+    legend_div = Div(
+        text=(
+            "<b>Map Layers</b><br>"
+            "road_areas: drivable polygons<br>"
+            "road_lanes: lane surface polygons<br>"
+            "crosswalks: pedestrian crossings<br>"
+            "walkways: pedestrian areas<br>"
+            "lane_centers: lane centerlines<br><br>"
+            "<b>Scene Layers</b><br>"
+            "trajectories: semantic keyframe traces<br>"
+            "agents: vehicle/pedestrian extents + heading markers<br>"
+            "edges: spatial / temporal / causal relations"
+        ),
+        width=360,
+        height=220,
     )
 
-    sstg = episode.sstg
-    nodes_at_peak = [n for n in sstg.get_nodes_at_timestep(episode.t_peak)
-                     if n.agent_id not in stationary_agents]
-    edges_at_peak = [e for e in sstg.get_edges_at_timestep(episode.t_peak)
-                     if e.source_id not in stationary_agents and e.target_id not in stationary_agents]
+    event_select = Select(
+        title="Event",
+        value=initial_event_id,
+        options=[(event_id, f"{event_id} | {payload['source_scene']['scene_name']}") for event_id, payload in events.items()],
+        width=360,
+    )
+    timestamp_select = Select(title="Timestamp", value=current_timestamp, options=TIMESTAMPS, width=180)
+    map_checkbox = CheckboxGroup(labels=MAP_LAYERS, active=[0, 1, 2, 3, 4], width=320)
+    scene_checkbox = CheckboxGroup(labels=["trajectories", "agents"] + EDGE_TYPES, active=[0, 1, 2, 3, 4], width=320)
 
-    # Create NetworkX graph
-    G = nx.DiGraph()
+    callback = CustomJS(
+        args=dict(
+            events=event_payloads,
+            maps=map_payloads,
+            rect_source=rect_source,
+            dir_source=dir_source,
+            traj_source=traj_source,
+            road_areas_source=map_sources["road_areas"],
+            road_lanes_source=map_sources["road_lanes"],
+            crosswalks_source=map_sources["crosswalks"],
+            walkways_source=map_sources["walkways"],
+            lane_centers_source=map_sources["lane_centers"],
+            spatial_source=edge_sources["spatial"],
+            temporal_source=edge_sources["temporal"],
+            causal_source=edge_sources["causal"],
+            info_div=info_div,
+            event_select=event_select,
+            timestamp_select=timestamp_select,
+            map_checkbox=map_checkbox,
+            scene_checkbox=scene_checkbox,
+            road_areas_renderer=map_renderers["road_areas"],
+            road_lanes_renderer=map_renderers["road_lanes"],
+            crosswalks_renderer=map_renderers["crosswalks"],
+            walkways_renderer=map_renderers["walkways"],
+            lane_centers_renderer=map_renderers["lane_centers"],
+            traj_renderer=traj_renderer,
+            rect_renderer=rect_renderer,
+            dir_renderer=dir_renderer,
+            spatial_renderer=edge_renderers["spatial"],
+            temporal_renderer=edge_renderers["temporal"],
+            causal_renderer=edge_renderers["causal"],
+            plot=plot,
+        ),
+        code="""
+const eventPayload = events[event_select.value];
+const mapPayload = maps[event_select.value];
+const timestamp = timestamp_select.value;
 
-    # Add nodes with positions
-    pos = {}
-    node_colors = []
-    for node in nodes_at_peak:
-        G.add_node(node.agent_id)
-        pos[node.agent_id] = (node.position[0], node.position[1])
-        node_colors.append(AGENT_COLORS.get(node.agent_type, "#95a5a6"))
+const setData = (source, data) => {
+  source.data = data;
+  source.change.emit();
+};
 
-    # Add edges by type
-    for edge_type in EdgeType:
-        edge_colors_list = []
-        edge_widths = []
-        edge_labels = {}
+const rectRecords = eventPayload.nodes_by_timestamp[timestamp] || [];
+setData(rect_source, {
+  xs: rectRecords.map(r => r.xs),
+  ys: rectRecords.map(r => r.ys),
+  agent_id: rectRecords.map(r => r.agent_id),
+  type: rectRecords.map(r => r.type),
+  speed_mps: rectRecords.map(r => r.speed_mps),
+  speed_kph: rectRecords.map(r => r.speed_kph),
+  heading: rectRecords.map(r => r.heading),
+  raw_timestep: rectRecords.map(r => r.raw_timestep),
+  fill_color: rectRecords.map(r => r.fill_color),
+  line_color: rectRecords.map(r => r.line_color),
+  fill_alpha: rectRecords.map(r => r.fill_alpha),
+  x: rectRecords.map(r => r.x),
+  y: rectRecords.map(r => r.y),
+});
+setData(dir_source, {
+  xs: rectRecords.map(r => r.dir_xs),
+  ys: rectRecords.map(r => r.dir_ys),
+  fill_color: rectRecords.map(r => r.fill_color),
+  line_color: rectRecords.map(r => r.line_color),
+  fill_alpha: rectRecords.map(r => r.fill_alpha),
+});
+setData(traj_source, {
+  xs: eventPayload.trajectories.map(r => r.xs),
+  ys: eventPayload.trajectories.map(r => r.ys),
+  line_color: eventPayload.trajectories.map(r => r.line_color),
+  agent_id: eventPayload.trajectories.map(r => r.agent_id),
+  type: eventPayload.trajectories.map(r => r.type),
+});
+setData(road_areas_source, mapPayload.road_areas || {xs: [], ys: []});
+setData(road_lanes_source, mapPayload.road_lanes || {xs: [], ys: []});
+setData(crosswalks_source, mapPayload.crosswalks || {xs: [], ys: []});
+setData(walkways_source, mapPayload.walkways || {xs: [], ys: []});
+setData(lane_centers_source, mapPayload.lane_centers || {xs: [], ys: []});
 
-        for edge in edges_at_peak:
-            if edge.edge_type == edge_type:
-                G.add_edge(edge.source_id, edge.target_id)
-                edge_colors_list.append(EDGE_COLORS[edge.edge_type])
-                edge_widths.append(max(1, edge.weight * 3))
-                edge_labels[(edge.source_id, edge.target_id)] = f"{edge.weight:.2f}"
+const updateEdge = (source, records) => {
+  setData(source, {
+    x0: records.map(r => r.x0),
+    y0: records.map(r => r.y0),
+    x1: records.map(r => r.x1),
+    y1: records.map(r => r.y1),
+    source_id: records.map(r => r.source_id),
+    target_id: records.map(r => r.target_id),
+    relation: records.map(r => r.relation),
+    weight: records.map(r => r.weight),
+    color: records.map(r => r.color),
+    line_width: records.map(r => r.line_width),
+    edge_type: records.map(r => r.edge_type),
+    timestamp_pair: records.map(r => r.timestamp_pair),
+    details: records.map(r => r.details),
+  });
+};
 
-    # Draw the graph
-    if G.edges:
-        # Group edges by type for drawing
-        for edge_type in EdgeType:
-            edge_list = [(e.source_id, e.target_id) for e in edges_at_peak if e.edge_type == edge_type]
-            if edge_list:
-                edge_colors = [EDGE_COLORS[edge_type]] * len(edge_list)
-                edge_widths = [max(1, e.weight * 3) for e in edges_at_peak if e.edge_type == edge_type]
-                nx.draw_networkx_edges(
-                    G, pos, ax=ax,
-                    edgelist=edge_list,
-                    edge_color=edge_colors,
-                    width=edge_widths,
-                    alpha=0.6,
-                    arrows=True,
-                    arrowsize=20,
-                    arrowstyle='->,head_length=0.4,head_width=0.3',
-                    label=EDGE_TYPE_NAMES[edge_type]
-                )
+updateEdge(spatial_source, eventPayload.edges_by_timestamp[timestamp].spatial || []);
+updateEdge(temporal_source, eventPayload.edges_by_timestamp[timestamp].temporal || []);
+updateEdge(causal_source, eventPayload.edges_by_timestamp[timestamp].causal || []);
 
-    # Draw nodes
-    nx.draw_networkx_nodes(
-        G, pos, ax=ax,
-        node_color=node_colors,
-        node_size=500,
-        edgecolors='black',
-        linewidths=1,
-        alpha=0.9
+road_areas_renderer.visible = map_checkbox.active.includes(0);
+road_lanes_renderer.visible = map_checkbox.active.includes(1);
+crosswalks_renderer.visible = map_checkbox.active.includes(2);
+walkways_renderer.visible = map_checkbox.active.includes(3);
+lane_centers_renderer.visible = map_checkbox.active.includes(4);
+
+traj_renderer.visible = scene_checkbox.active.includes(0);
+rect_renderer.visible = scene_checkbox.active.includes(1);
+dir_renderer.visible = scene_checkbox.active.includes(1);
+spatial_renderer.visible = scene_checkbox.active.includes(2);
+temporal_renderer.visible = scene_checkbox.active.includes(3);
+causal_renderer.visible = scene_checkbox.active.includes(4);
+
+const bbox = eventPayload.bbox;
+plot.x_range.start = bbox[0];
+plot.x_range.end = bbox[1];
+plot.y_range.start = bbox[2];
+plot.y_range.end = bbox[3];
+
+const window = eventPayload.episode_window;
+info_div.text =
+  `<b>Event</b>: ${eventPayload.event_id}<br>` +
+  `<b>Scene</b>: ${eventPayload.scene_name} (${eventPayload.env_name})<br>` +
+  `<b>Ego</b>: ${eventPayload.ego_agent_id}<br>` +
+  `<b>Episode Type</b>: ${eventPayload.episode_type}<br>` +
+  `<b>Risk Score</b>: ${eventPayload.risk_score.toFixed(4)}<br>` +
+  `<b>Timestamp</b>: ${timestamp}<br>` +
+  `<b>Window</b>: T_start=${window.T_start}, T_peak=${window.T_peak}, T_end=${window.T_end}<br>` +
+  `<b>Rules</b>: ${eventPayload.applied_rules.join(", ")}`;
+""",
     )
 
-    # Draw labels
-    nx.draw_networkx_labels(
-        G, pos, ax=ax,
-        font_size=8,
-        font_weight='bold'
+    event_select.js_on_change("value", callback)
+    timestamp_select.js_on_change("value", callback)
+    map_checkbox.js_on_change("active", callback)
+    scene_checkbox.js_on_change("active", callback)
+
+    return row(
+        plot,
+        column(event_select, timestamp_select, map_checkbox, scene_checkbox, info_div, legend_div, width=380),
     )
 
-    # Add legend
-    legend_elements = [
-        plt.Line2D([0], [0], marker='o', color='w', label='Vehicle',
-                  markerfacecolor=AGENT_COLORS['VEHICLE'], markersize=10),
-        plt.Line2D([0], [0], marker='o', color='w', label='Pedestrian',
-                  markerfacecolor=AGENT_COLORS['PEDESTRIAN'], markersize=10),
-        plt.Line2D([0], [0], marker='o', color='w', label='Bicycle',
-                  markerfacecolor=AGENT_COLORS['BICYCLE'], markersize=10),
-    ]
-    for edge_type, color in EDGE_COLORS.items():
-        legend_elements.append(
-            plt.Line2D([0], [0], color=color, label=EDGE_TYPE_NAMES[edge_type], linewidth=2)
-        )
-    ax.legend(handles=legend_elements, loc='upper right', fontsize=8)
 
-    ax.set_aspect('equal')
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Saved graph visualization to: {save_path}")
-
-    plt.show()
-
-
-def create_ttc_heatmap(episode: Episode, stationary_agents: Set[str], save_path: Path = None):
-    """Create a heatmap of TTC values between agent pairs at t_peak."""
-    if episode.sstg is None:
-        print("No SSTG data available for visualization")
-        return
-
-    nodes_at_peak = episode.sstg.get_nodes_at_timestep(episode.t_peak)
-    nodes_at_peak = [n for n in nodes_at_peak if n.agent_id not in stationary_agents]
-    agent_ids = sorted([n.agent_id for n in nodes_at_peak])
-
-    if len(agent_ids) < 2:
-        print("Not enough active agents for TTC heatmap")
-        return
-
-    # Compute pairwise TTC
-    ttc_matrix = np.full((len(agent_ids), len(agent_ids)), np.inf)
-
-    for i, aid1 in enumerate(agent_ids):
-        for j, aid2 in enumerate(agent_ids):
-            if i == j:
-                ttc_matrix[i, j] = 0
-                continue
-
-            node1 = next((n for n in nodes_at_peak if n.agent_id == aid1), None)
-            node2 = next((n for n in nodes_at_peak if n.agent_id == aid2), None)
-
-            if node1 and node2:
-                # Compute TTC
-                pos1 = np.array(node1.position)
-                pos2 = np.array(node2.position)
-                vel1 = np.array(node1.velocity)
-                vel2 = np.array(node2.velocity)
-
-                rel_pos = pos2 - pos1
-                rel_vel = vel2 - vel1
-                distance = np.linalg.norm(rel_pos)
-                rel_speed = np.linalg.norm(rel_vel)
-
-                if rel_speed > 0.1:
-                    closing_rate = -np.dot(rel_pos, rel_vel) / (rel_speed * distance)
-                    if closing_rate > 0:
-                        ttc = distance / rel_speed
-                        ttc_matrix[i, j] = ttc
-
-    # Plot heatmap
-    fig, ax = plt.subplots(figsize=(12, 10))
-    ax.set_title(f"TTC Matrix at t_peak={episode.t_peak} (seconds)\nFiltered {len(stationary_agents)} stationary agents")
-
-    # Use log scale for better visualization
-    ttc_display = ttc_matrix.copy()
-    ttc_display[ttc_display > 10] = 10  # Cap at 10 seconds for visualization
-
-    im = ax.imshow(ttc_display, cmap='RdYlGn_r', vmin=0, vmax=10)
-
-    # Labels
-    ax.set_xticks(range(len(agent_ids)))
-    ax.set_yticks(range(len(agent_ids)))
-    ax.set_xticklabels(agent_ids, rotation=90, fontsize=8)
-    ax.set_yticklabels(agent_ids, fontsize=8)
-
-    # Colorbar
-    cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label('TTC (seconds)', rotation=270, labelpad=20)
-
-    # Add text annotations
-    for i in range(len(agent_ids)):
-        for j in range(len(agent_ids)):
-            if i != j and ttc_matrix[i, j] < 10:
-                text = ax.text(j, i, f'{ttc_matrix[i, j]:.1f}',
-                             ha="center", va="center", color="black", fontsize=6)
-
-    plt.tight_layout()
-
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Saved TTC heatmap to: {save_path}")
-
-    plt.show()
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Visualize risk episodes")
-    parser.add_argument("--event-id", type=str, help="Event ID to visualize")
-    parser.add_argument("--list", action="store_true", help="List all available events")
-    parser.add_argument("--output-dir", type=str, default="./output/visualizations",
-                       help="Output directory for visualizations")
-    parser.add_argument("--show-graph", action="store_true", help="Show interaction graph")
-    parser.add_argument("--show-ttc", action="store_true", help="Show TTC heatmap")
-    parser.add_argument("--show-edge-types", action="store_true", help="Show edge type subplots")
-    parser.add_argument("--min-speed", type=float, default=0.5,
-                       help="Minimum average speed threshold for filtering stationary agents (m/s)")
-    parser.add_argument("--min-displacement", type=float, default=5.0,
-                       help="Minimum displacement threshold for filtering stationary agents (m)")
-
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Create an interactive Bokeh viewer for mined risk events.")
+    parser.add_argument("--output-dir", type=str, default="./output")
+    parser.add_argument("--event-id", type=str, default=None)
+    parser.add_argument("--list", action="store_true")
+    parser.add_argument("--html", type=str, default=None)
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    element_dir = Path("./output/test/libraries/risk_elements")
-    event_dir = Path("./output/test/libraries/risk_events")
+    element_dir = output_dir / "libraries" / "risk_elements"
+    event_dir = output_dir / "libraries" / "risk_events"
 
     if args.list:
-        print("Available events:")
-        print("-" * 60)
-        events = list_events(element_dir, event_dir)
-        for event in events:
-            # Extract event_id from element_id (element_f5923ef8 -> event_f5923ef8)
-            element_id = event.get('element_id', event.get('event_id', 'unknown'))
-            event_id = element_id.replace('element_', 'event_')
-            print(f"  {event_id}: "
-                  f"Scene={event['scene_name']}, "
-                  f"Type={event['episode_type']}, "
-                  f"Score={event['risk_score']:.2f}")
+        for entry in list_events(element_dir):
+            print(f"{entry['event_id']} | scene={entry['scene_name']} | risk={entry['risk_score']:.4f}")
         return
 
-    if not args.event_id:
-        print("Error: Please specify --event-id or use --list to see available events")
-        return
+    events = load_events(event_dir)
+    if not events:
+        raise FileNotFoundError(f"No event JSON files found in {event_dir}")
 
-    # Load episode
-    print(f"Loading episode: {args.event_id}")
-    episode = load_episode(event_dir, args.event_id)
+    initial_event_id = args.event_id or next(iter(events.keys()))
+    if initial_event_id not in events:
+        raise KeyError(f"Unknown event id: {initial_event_id}")
 
-    print(f"  Scene: {episode.metadata.get('scene_name', 'Unknown')}")
-    print(f"  Episode type: {episode.episode_type.value}")
-    print(f"  Risk score: {episode.risk_score:.2f}")
-    print(f"  t_start: {episode.t_start}, t_peak: {episode.t_peak}, t_end: {episode.t_end}")
-    print(f"  Involved agents: {len(episode.involved_agents)}")
-
-    if episode.sstg:
-        summary = episode.sstg.get_summary()
-        print(f"  SSTG: {summary['num_nodes']} nodes, {summary['num_edges']} edges")
-
-    # Filter stationary agents
-    print("\nFiltering stationary agents...")
-    stationary_agents = filter_stationary_agents(
-        episode.sstg,
-        min_avg_speed=args.min_speed,
-        min_displacement=args.min_displacement
-    )
-    print(f"  Found {len(stationary_agents)} stationary agents to filter")
-    if stationary_agents:
-        print(f"  Stationary agents: {list(stationary_agents)[:5]}{'...' if len(stationary_agents) > 5 else ''}")
-
-    # Create visualizations
-    print("\nCreating visualizations...")
-
-    # Static plot
-    save_path = output_dir / f"{args.event_id}_overview.png"
-    plot_episode_static(episode, stationary_agents, save_path)
-
-    # Edge type subplots
-    if args.show_edge_types:
-        save_path = output_dir / f"{args.event_id}_edge_types.png"
-        plot_edge_type_subplots(episode, stationary_agents, save_path)
-
-    # Interaction graph
-    if args.show_graph:
-        save_path = output_dir / f"{args.event_id}_graph.png"
-        plot_interactions_graph(episode, stationary_agents, save_path)
-
-    # TTC heatmap
-    if args.show_ttc:
-        save_path = output_dir / f"{args.event_id}_ttc.png"
-        create_ttc_heatmap(episode, stationary_agents, save_path)
+    html_path = Path(args.html) if args.html else output_dir / f"{initial_event_id}_interactive.html"
+    output_file(html_path, title=f"Risk Event Viewer - {initial_event_id}")
+    save(create_interactive_document(events, initial_event_id))
+    print(f"Saved interactive viewer to {html_path}")
 
 
 if __name__ == "__main__":

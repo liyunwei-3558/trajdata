@@ -1,305 +1,95 @@
 """
-Unit tests for rule engine.
+Unit tests for the strategy-based rule engine.
 """
 
 import sys
 from pathlib import Path
 
-# Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
-from src.core import Node
-from src.rules import (
-    BaseRule, RuleResult, RuleRegistry, RulePriority,
-    SpatialROIRule, ConflictLaneRule, TTCCriticalRule,
-    DecelerationRule, AgentTypePresenceRule,
-)
+from src.core import EdgeType, Episode, EpisodeType, Node, SSTG
+from src.rules import BaseRule, RuleRegistry, SpatialROIRule, TTCCriticalRule
 
 
-def test_rule_result():
-    """Test RuleResult creation."""
-    result = RuleResult(
-        passed=True,
-        score=0.8,
-        message="Test passed",
-        metadata={"key": "value"},
-        involved_agents={"agent_1", "agent_2"},
+def build_episode() -> Episode:
+    return Episode(
+        scene_id="env:scene",
+        scene_name="scene",
+        env_name="env",
+        dt=0.1,
+        ego_agent_id="ego",
+        t_start=8,
+        t_peak=10,
+        t_end=12,
+        involved_agents=["ego", "agent_1", "agent_far"],
+        episode_type=EpisodeType.TTC_MIN_WINDOW,
+        risk_score=0.6,
+        state_snapshots={
+            "T_start": {
+                "ego": Node("ego", "T_start", "VEHICLE", (10.0, 0.0), (0.0, 0.0), position=(0.0, 0.0)),
+                "agent_1": Node("agent_1", "T_start", "VEHICLE", (-5.0, 0.0), (0.0, 0.0), position=(20.0, 0.0)),
+            },
+            "T_peak": {
+                "ego": Node("ego", "T_peak", "VEHICLE", (10.0, 0.0), (0.0, 0.0), position=(10.0, 0.0)),
+                "agent_1": Node("agent_1", "T_peak", "VEHICLE", (-10.0, 0.0), (0.0, 0.0), position=(20.0, 0.0)),
+                "agent_far": Node("agent_far", "T_peak", "VEHICLE", (0.0, 0.0), (0.0, 0.0), position=(200.0, 0.0)),
+            },
+            "T_end": {
+                "ego": Node("ego", "T_end", "VEHICLE", (10.0, 0.0), (0.0, 0.0), position=(20.0, 0.0)),
+                "agent_1": Node("agent_1", "T_end", "VEHICLE", (-10.0, 0.0), (0.0, 0.0), position=(10.0, 0.0)),
+            },
+        },
     )
 
-    assert result.passed is True
-    assert result.score == 0.8
-    assert result.message == "Test passed"
-    assert result.metadata["key"] == "value"
-    assert result.involved_agents == {"agent_1", "agent_2"}
 
-    print("✓ test_rule_result passed")
-
-
-def test_rule_registry():
-    """Test RuleRegistry basic operations."""
+def test_rule_registry_register_and_unregister():
     registry = RuleRegistry()
 
-    # Create a dummy rule
     class DummyRule(BaseRule):
-        def evaluate(self, nodes, center_point=None, context=None):
-            return RuleResult(
-                passed=True,
-                score=1.0,
-                message="Dummy",
-                involved_agents=set(),
-            )
+        def __init__(self):
+            super().__init__("dummy")
 
-    rule = DummyRule(name="dummy_rule", priority=RulePriority.MEDIUM)
+        def apply(self, episode, current_graph):
+            current_graph.metadata["dummy"] = True
+            return current_graph
 
-    # Register
+    rule = DummyRule()
     registry.register(rule)
-
-    # Get rule
-    retrieved = registry.get_rule("dummy_rule")
-    assert retrieved is rule
-
-    # Get enabled rules
-    enabled = registry.get_enabled_rules()
-    assert len(enabled) == 1
-    assert enabled[0] is rule
-
-    # Unregister
-    registry.unregister("dummy_rule")
-    assert registry.get_rule("dummy_rule") is None
-
-    print("✓ test_rule_registry passed")
+    assert registry.get_rule("dummy") is rule
+    assert registry.get_enabled_rules() == [rule]
+    registry.unregister("dummy")
+    assert registry.get_rule("dummy") is None
 
 
-def test_spatial_roi_rule():
-    """Test SpatialROIRule."""
-    rule = SpatialROIRule(roi_radius=50.0, min_agents=2)
-
-    # Create nodes
-    nodes = [
-        Node(
-            agent_id=f"agent_{i}",
-            agent_type="VEHICLE",
-            timestep=0,
-            position=(float(i * 10), 0.0),
-            velocity=(5.0, 0.0),
-            acceleration=(0.0, 0.0),
-            heading=0.0,
-            extent=(4.5, 2.0),
-        )
-        for i in range(5)
-    ]
-
-    # Test with center point
-    center_point = (20.0, 0.0)
-    result = rule.evaluate(nodes, center_point)
-
-    # Agents 1, 2, 3 should be in ROI (10, 20, 30 meters from center)
-    assert result.passed is True
-    assert len(result.involved_agents) >= 2
-
-    # Test with no center point
-    result_no_center = rule.evaluate(nodes, None)
-    assert result_no_center.passed is False
-
-    print("✓ test_spatial_roi_rule passed")
-
-
-def test_conflict_lane_rule():
-    """Test ConflictLaneRule."""
-    rule = ConflictLaneRule(conflict_distance=15.0, min_conflicts=1)
-
-    # Create nodes with some close pairs
-    nodes = [
-        Node(
-            agent_id="agent_0",
-            agent_type="VEHICLE",
-            timestep=0,
-            position=(0.0, 0.0),
-            velocity=(5.0, 0.0),
-            acceleration=(0.0, 0.0),
-            heading=0.0,
-            extent=(4.5, 2.0),
-        ),
-        Node(
-            agent_id="agent_1",
-            agent_type="VEHICLE",
-            timestep=0,
-            position=(10.0, 0.0),
-            velocity=(5.0, 0.0),
-            acceleration=(0.0, 0.0),
-            heading=0.0,
-            extent=(4.5, 2.0),
-        ),
-        Node(
-            agent_id="agent_2",
-            agent_type="VEHICLE",
-            timestep=0,
-            position=(50.0, 0.0),
-            velocity=(5.0, 0.0),
-            acceleration=(0.0, 0.0),
-            heading=0.0,
-            extent=(4.5, 2.0),
-        ),
-    ]
-
-    result = rule.evaluate(nodes)
-
-    # agent_0 and agent_1 are within conflict distance
-    assert result.passed is True
-    assert "agent_0" in result.involved_agents
-    assert "agent_1" in result.involved_agents
-
-    print("✓ test_conflict_lane_rule passed")
-
-
-def test_ttc_critical_rule():
-    """Test TTCCriticalRule."""
-    rule = TTCCriticalRule(ttc_threshold=3.0, min_critical_pairs=1)
-
-    # Create nodes on collision course
-    nodes = [
-        Node(
-            agent_id="agent_1",
-            agent_type="VEHICLE",
-            timestep=0,
-            position=(0.0, 0.0),
-            velocity=(10.0, 0.0),
-            acceleration=(0.0, 0.0),
-            heading=0.0,
-            extent=(4.5, 2.0),
-        ),
-        Node(
-            agent_id="agent_2",
-            agent_type="VEHICLE",
-            timestep=0,
-            position=(20.0, 0.0),
-            velocity=(-10.0, 0.0),
-            acceleration=(0.0, 0.0),
-            heading=3.14,
-            extent=(4.5, 2.0),
-        ),
-    ]
-
-    result = rule.evaluate(nodes)
-
-    # Approaching head-on, TTC = 20/20 = 1s < 3s threshold
-    assert result.passed is True
-    assert "agent_1" in result.involved_agents
-    assert "agent_2" in result.involved_agents
-
-    print("✓ test_ttc_critical_rule passed")
-
-
-def test_deceleration_rule():
-    """Test DecelerationRule."""
-    rule = DecelerationRule(decel_threshold=3.0, min_braking_agents=1)
-
-    # Create nodes with braking
-    nodes = [
-        Node(
-            agent_id="agent_1",
-            agent_type="VEHICLE",
-            timestep=0,
-            position=(0.0, 0.0),
-            velocity=(10.0, 0.0),
-            acceleration=(-5.0, 0.0),  # Braking!
-            heading=0.0,
-            extent=(4.5, 2.0),
-        ),
-        Node(
-            agent_id="agent_2",
-            agent_type="VEHICLE",
-            timestep=0,
-            position=(10.0, 0.0),
-            velocity=(5.0, 0.0),
-            acceleration=(0.0, 0.0),
-            heading=0.0,
-            extent=(4.5, 2.0),
-        ),
-    ]
-
-    result = rule.evaluate(nodes)
-
-    # agent_1 is braking at 5 m/s^2 > 3 m/s^2 threshold
-    assert result.passed is True
-    assert "agent_1" in result.involved_agents
-
-    print("✓ test_deceleration_rule passed")
-
-
-def test_agent_type_presence_rule():
-    """Test AgentTypePresenceRule."""
-    rule = AgentTypePresenceRule(
-        required_types={"VEHICLE", "PEDESTRIAN"},
-        min_count=1,
+def test_spatial_roi_rule_adds_spatial_and_temporal_edges():
+    episode = build_episode()
+    graph = SpatialROIRule(roi_radius=50.0).apply(
+        episode,
+        SSTG(scene_id=episode.scene_id, dt=episode.dt),
     )
 
-    # Create mixed nodes
-    nodes = [
-        Node(
-            agent_id=f"agent_{i}",
-            agent_type="VEHICLE" if i < 2 else "PEDESTRIAN",
-            timestep=0,
-            position=(float(i * 10), 0.0),
-            velocity=(5.0, 0.0),
-            acceleration=(0.0, 0.0),
-            heading=0.0,
-            extent=(4.5, 2.0) if i < 2 else (0.5, 0.5),
-        )
-        for i in range(3)
-    ]
+    peak_nodes = graph.get_nodes_at_timestamp("T_peak")
+    assert {node.agent_id for node in peak_nodes} == {"ego", "agent_1"}
 
-    result = rule.evaluate(nodes)
-
-    # Both types present
-    assert result.passed is True
-    assert len(result.involved_agents) == 3
-
-    print("✓ test_agent_type_presence_rule passed")
+    edge_types = {edge.edge_type for edge in graph.get_edges_at_timestamp("T_peak")}
+    assert EdgeType.SPATIAL in edge_types
+    assert EdgeType.TEMPORAL in edge_types
 
 
-def test_registry_evaluate_all():
-    """Test RuleRegistry evaluate_all."""
+def test_ttc_rule_adds_causal_edge_at_peak():
+    episode = build_episode()
     registry = RuleRegistry()
+    registry.register(SpatialROIRule(roi_radius=50.0))
+    registry.register(TTCCriticalRule(ttc_threshold=2.5))
 
-    # Add rules
-    registry.register(SpatialROIRule(roi_radius=50.0, min_agents=1))
-    registry.register(ConflictLaneRule(conflict_distance=15.0, min_conflicts=1))
+    graph = registry.apply_all(episode)
+    episode.sstg = graph
 
-    # Create nodes
-    nodes = [
-        Node(
-            agent_id=f"agent_{i}",
-            agent_type="VEHICLE",
-            timestep=0,
-            position=(float(i * 10), 0.0),
-            velocity=(5.0, 0.0),
-            acceleration=(0.0, 0.0),
-            heading=0.0,
-            extent=(4.5, 2.0),
-        )
-        for i in range(3)
+    causal_edges = [
+        edge
+        for edge in graph.get_edges_at_timestamp("T_peak")
+        if edge.edge_type == EdgeType.CAUSAL
     ]
-
-    # Evaluate all
-    passed, score, results = registry.evaluate_all(nodes, center_point=(10.0, 0.0))
-
-    assert passed is True
-    assert 0 <= score <= 1
-    assert len(results) == 2
-
-    print("✓ test_registry_evaluate_all passed")
-
-
-if __name__ == "__main__":
-    print("Running rule tests...")
-    test_rule_result()
-    test_rule_registry()
-    test_spatial_roi_rule()
-    test_conflict_lane_rule()
-    test_ttc_critical_rule()
-    test_deceleration_rule()
-    test_agent_type_presence_rule()
-    test_registry_evaluate_all()
-    print("\n✅ All rule tests passed!")
+    assert len(causal_edges) == 1
+    assert causal_edges[0].relation == "has_collision_risk"
+    assert episode.rule_trace == ["spatial_roi", "ttc_critical"]
