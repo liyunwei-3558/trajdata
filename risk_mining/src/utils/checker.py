@@ -23,6 +23,17 @@ class SanityCheckResult:
 
 
 def validate_graph(sstg: SSTG) -> SanityCheckResult:
+    manual_review_status = sstg.metadata.get("manual_review_status")
+    if manual_review_status is not None:
+        return SanityCheckResult(
+            passed=False,
+            reason=str(sstg.metadata.get("manual_review_reason", "Graph flagged for manual review.")),
+            details={
+                "manual_review_status": manual_review_status,
+                "manual_review_details": sstg.metadata.get("manual_review_details", {}),
+            },
+        )
+
     causal_edges = 0
     for _, _, data in sstg.graph.edges(data=True):
         if data.get("edge_type") == EdgeType.CAUSAL.value:
@@ -54,6 +65,15 @@ class SanityChecker:
                 passed=False,
                 reason="Episode has no SSTG attached.",
                 details={"causal_edge_count": 0},
+            )
+        if episode.metadata.get("manual_review_required"):
+            return SanityCheckResult(
+                passed=False,
+                reason=str(episode.metadata.get("manual_review_reason", "Episode flagged for manual review.")),
+                details={
+                    "manual_review_status": episode.metadata.get("manual_review_status", "requested"),
+                    "manual_review_details": episode.metadata.get("manual_review_details", {}),
+                },
             )
         return validate_graph(episode.sstg)
 

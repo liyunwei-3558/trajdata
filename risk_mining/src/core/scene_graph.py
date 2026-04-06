@@ -118,7 +118,7 @@ class SSTG:
         self.scene_id = scene_id
         self.dt = float(dt)
         self.metadata = dict(metadata or {})
-        self.graph = nx.DiGraph()
+        self.graph = nx.MultiDiGraph()
 
     @property
     def timestamps(self) -> List[str]:
@@ -143,7 +143,12 @@ class SSTG:
         if source_key not in self.graph or target_key not in self.graph:
             raise ValueError("Edge endpoints must exist in the graph before adding the edge.")
 
-        self.graph.add_edge(source_key, target_key, **edge.to_dict())
+        self.graph.add_edge(
+            source_key,
+            target_key,
+            key=self._make_edge_key(edge),
+            **edge.to_dict(),
+        )
 
     def get_nodes_at_timestamp(self, timestamp: str) -> List[Node]:
         nodes = [
@@ -155,7 +160,7 @@ class SSTG:
 
     def get_edges_at_timestamp(self, timestamp: str) -> List[Edge]:
         edges: List[Edge] = []
-        for _, _, data in self.graph.edges(data=True):
+        for _, _, _, data in self.graph.edges(keys=True, data=True):
             if data["source_timestamp"] == timestamp or data["target_timestamp"] == timestamp:
                 edges.append(Edge.from_dict(data))
         return edges
@@ -178,8 +183,8 @@ class SSTG:
                 for key, data in self.graph.nodes(data=True)
             ],
             "edges": [
-                {"source": source, "target": target, "data": dict(data)}
-                for source, target, data in self.graph.edges(data=True)
+                {"source": source, "target": target, "key": key, "data": dict(data)}
+                for source, target, key, data in self.graph.edges(keys=True, data=True)
             ],
         }
 
@@ -189,7 +194,12 @@ class SSTG:
         for node_entry in data.get("nodes", []):
             sstg.graph.add_node(node_entry["key"], **node_entry["data"])
         for edge_entry in data.get("edges", []):
-            sstg.graph.add_edge(edge_entry["source"], edge_entry["target"], **edge_entry["data"])
+            sstg.graph.add_edge(
+                edge_entry["source"],
+                edge_entry["target"],
+                key=edge_entry.get("key"),
+                **edge_entry["data"],
+            )
         return sstg
 
     def get_summary(self) -> Dict[str, Any]:
@@ -198,7 +208,7 @@ class SSTG:
             node_counts_by_type[data["type"]] = node_counts_by_type.get(data["type"], 0) + 1
 
         edge_counts_by_type: Dict[str, int] = {}
-        for _, _, data in self.graph.edges(data=True):
+        for _, _, _, data in self.graph.edges(keys=True, data=True):
             edge_type = data["edge_type"]
             edge_counts_by_type[edge_type] = edge_counts_by_type.get(edge_type, 0) + 1
 
@@ -216,6 +226,16 @@ class SSTG:
     @classmethod
     def _make_node_key(cls, agent_id: str, timestamp: str) -> str:
         return f"{agent_id}@{timestamp}"
+
+    @staticmethod
+    def _make_edge_key(edge: Edge) -> str:
+        relation = edge.relation or "none"
+        return (
+            f"{edge.edge_type.value}:"
+            f"{edge.source_id}@{edge.source_timestamp}->"
+            f"{edge.target_id}@{edge.target_timestamp}:"
+            f"{relation}"
+        )
 
     @classmethod
     def _timestamp_sort_key(cls, timestamp: str) -> Tuple[int, str]:

@@ -10,11 +10,11 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from bokeh.layouts import column, row
-from bokeh.models import CheckboxGroup, ColumnDataSource, CustomJS, Div, HoverTool, Select
+from bokeh.models import CheckboxGroup, ColumnDataSource, CustomJS, Div, HoverTool, LabelSet, Select
 from bokeh.plotting import figure, output_file, save
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -155,14 +155,27 @@ def _build_agent_geometry(node: Dict[str, Any]) -> Tuple[List[float], List[float
 def _build_event_payload(raw_event: Dict) -> Dict[str, Any]:
     node_lookup: Dict[Tuple[str, str], Dict[str, Any]] = {}
     nodes_by_timestamp: Dict[str, List[Dict[str, Any]]] = {label: [] for label in TIMESTAMPS}
-    trajectories: Dict[str, Dict[str, Any]] = {}
+    trajectory_points: Dict[str, Dict[str, Any]] = {}
+    agent_positions_by_timestamp: Dict[str, Dict[str, Tuple[float, float]]] = {}
+    primary_risk_agent_ids = set(raw_event.get("metadata", {}).get("primary_risk_agent_ids", []))
+    trigger_agent_id = raw_event.get("metadata", {}).get("trigger_agent_id")
+    if trigger_agent_id is not None:
+        primary_risk_agent_ids.add(trigger_agent_id)
 
     for node_entry in raw_event["sstg"]["nodes"]:
         node = node_entry["data"]
         timestamp = node["timestamp"]
+        if node["agent_id"] == raw_event["ego_agent_id"]:
+            agent_role = "ego"
+        elif node["agent_id"] in primary_risk_agent_ids:
+            agent_role = "primary"
+        else:
+            agent_role = "secondary"
         rect_xs, rect_ys, dir_xs, dir_ys = _build_agent_geometry(node)
         record = {
             "agent_id": node["agent_id"],
+            "display_id": str(node["agent_id"]),
+            "agent_role": agent_role,
             "type": node["type"],
             "timestamp": timestamp,
             "x": node["position"][0] if node.get("position") else None,
@@ -174,8 +187,8 @@ def _build_event_payload(raw_event: Dict) -> Dict[str, Any]:
             "heading": node.get("heading"),
             "raw_timestep": node.get("metadata", {}).get("raw_timestep"),
             "fill_color": AGENT_COLOR_BY_NAME.get(node["type"], AGENT_COLOR_BY_NAME["UNKNOWN"]),
-            "line_color": "black",
-            "fill_alpha": 0.85 if node["agent_id"] == raw_event["ego_agent_id"] else 0.65,
+            "line_color": "#d62828" if agent_role == "ego" else "#111111" if agent_role == "primary" else "#666666",
+            "fill_alpha": 0.95 if agent_role == "ego" else 0.8 if agent_role == "primary" else 0.28,
             "speed_mps": float(np.linalg.norm(np.asarray(node["velocity"], dtype=float))),
             "speed_kph": float(np.linalg.norm(np.asarray(node["velocity"], dtype=float)) * 3.6),
             "xs": rect_xs,
@@ -183,37 +196,100 @@ def _build_event_payload(raw_event: Dict) -> Dict[str, Any]:
             "dir_xs": dir_xs,
             "dir_ys": dir_ys,
         }
-        nodes_by_timestamp[timestamp].append(record)
-        node_lookup[(node["agent_id"], timestamp)] = record
+        if node.get("position") is not None:
+            nodes_by_timestamp[timestamp].append(record)
+            node_lookup[(node["agent_id"], timestamp)] = record
+            agent_positions_by_timestamp.setdefault(node["agent_id"], {})[timestamp] = (
+                node["position"][0],
+                node["position"][1],
+            )
 
-        trajectory = trajectories.setdefault(
+        trajectory = trajectory_points.setdefault(
             node["agent_id"],
             {
-                "xs": [],
-                "ys": [],
+                "points_by_timestamp": {},
                 "line_color": AGENT_COLOR_BY_NAME.get(node["type"], AGENT_COLOR_BY_NAME["UNKNOWN"]),
                 "agent_id": node["agent_id"],
+                "agent_role": agent_role,
                 "type": node["type"],
             },
         )
         if node.get("position") is not None:
-            trajectory["xs"].append(node["position"][0])
-            trajectory["ys"].append(node["position"][1])
+            trajectory["points_by_timestamp"][timestamp] = (
+                node["position"][0],
+                node["position"][1],
+            )
+
+    trajectories: List[Dict[str, Any]] = []
+    for trajectory in trajectory_points.values():
+        if trajectory["agent_role"] not in {"ego", "primary"}:
+            continue
+        points_by_timestamp = trajectory["points_by_timestamp"]
+        current_segment: List[Tuple[float, float]] = []
+        for timestamp in TIMESTAMPS:
+            point = points_by_timestamp.get(timestamp)
+            if point is None:
+                if len(current_segment) >= 2:
+                    trajectories.append(
+                        {
+                            "xs": [pt[0] for pt in current_segment],
+                            "ys": [pt[1] for pt in current_segment],
+                            "line_color": trajectory["line_color"],
+                            "agent_id": trajectory["agent_id"],
+                            "agent_role": trajectory["agent_role"],
+                            "type": trajectory["type"],
+                        }
+                    )
+                current_segment = []
+                continue
+            current_segment.append(point)
+
+        if len(current_segment) >= 2:
+            trajectories.append(
+                {
+                    "xs": [pt[0] for pt in current_segment],
+                    "ys": [pt[1] for pt in current_segment],
+                    "line_color": trajectory["line_color"],
+                    "agent_id": trajectory["agent_id"],
+                    "agent_role": trajectory["agent_role"],
+                    "type": trajectory["type"],
+                }
+            )
 
     edges_by_timestamp: Dict[str, Dict[str, List[Dict[str, Any]]]] = {
         label: {edge_type: [] for edge_type in EDGE_TYPES} for label in TIMESTAMPS
     }
     for edge_entry in raw_event["sstg"]["edges"]:
         edge = edge_entry["data"]
-        source = node_lookup.get((edge["source_id"], edge["source_timestamp"]))
-        target = node_lookup.get((edge["target_id"], edge["target_timestamp"]))
-        if source is None or target is None:
+        source_x, source_y, source_ghost = _resolve_edge_endpoint(
+            agent_id=edge["source_id"],
+            timestamp=edge["source_timestamp"],
+            node_lookup=node_lookup,
+            agent_positions_by_timestamp=agent_positions_by_timestamp,
+        )
+        target_x, target_y, target_ghost = _resolve_edge_endpoint(
+            agent_id=edge["target_id"],
+            timestamp=edge["target_timestamp"],
+            node_lookup=node_lookup,
+            agent_positions_by_timestamp=agent_positions_by_timestamp,
+        )
+        if None in (source_x, source_y, target_x, target_y):
             continue
+        edge_status = edge.get("metadata", {}).get("edge_status", "active")
+        if edge["edge_type"] == "spatial":
+            line_alpha = 0.95 if edge_status == "active" else 0.45 if edge_status == "outside_roi" else 0.3
+            line_dash = "solid" if edge_status == "active" else "dashed"
+        elif edge["edge_type"] == "temporal":
+            line_alpha = 0.8
+            line_dash = "dashed"
+        else:
+            line_alpha = 0.95
+            line_dash = "solid"
         edge_record = {
-            "x0": source["x"],
-            "y0": source["y"],
-            "x1": target["x"],
-            "y1": target["y"],
+            "x0": source_x,
+            "y0": source_y,
+            "x1": target_x,
+            "y1": target_y,
             "source_id": edge["source_id"],
             "target_id": edge["target_id"],
             "relation": edge.get("relation") or "",
@@ -221,6 +297,11 @@ def _build_event_payload(raw_event: Dict) -> Dict[str, Any]:
             "color": EDGE_COLORS[edge["edge_type"]],
             "line_width": max(1.5, float(edge.get("weight", 1.0)) * 4.0),
             "edge_type": edge["edge_type"],
+            "edge_status": edge_status,
+            "line_alpha": line_alpha,
+            "line_dash": line_dash,
+            "source_is_ghost": source_ghost,
+            "target_is_ghost": target_ghost,
             "timestamp_pair": f"{edge['source_timestamp']} -> {edge['target_timestamp']}",
             "details": json.dumps(edge.get("metadata", {}), ensure_ascii=False),
         }
@@ -236,10 +317,15 @@ def _build_event_payload(raw_event: Dict) -> Dict[str, Any]:
         "risk_score": raw_event["risk_score"],
         "episode_type": raw_event["episode_type"],
         "applied_rules": raw_event.get("applied_rules", []),
+        "peak_metric_type": raw_event.get("metadata", {}).get("peak_metric_type"),
+        "peak_metric_value": raw_event.get("metadata", {}).get("peak_metric_value"),
+        "start_rule": raw_event.get("metadata", {}).get("start_rule"),
+        "end_rule": raw_event.get("metadata", {}).get("end_rule"),
         "episode_window": raw_event["episode_window"],
+        "primary_risk_agent_ids": sorted(primary_risk_agent_ids),
         "nodes_by_timestamp": nodes_by_timestamp,
         "edges_by_timestamp": edges_by_timestamp,
-        "trajectories": list(trajectories.values()),
+        "trajectories": trajectories,
         "bbox": _compute_bbox(raw_event, margin=30.0),
     }
 
@@ -248,12 +334,43 @@ def _columns_from_records(records: List[Dict[str, Any]], fields: List[str]) -> D
     return {field: [record.get(field) for record in records] for field in fields}
 
 
+def _resolve_edge_endpoint(
+    agent_id: str,
+    timestamp: str,
+    node_lookup: Dict[Tuple[str, str], Dict[str, Any]],
+    agent_positions_by_timestamp: Dict[str, Dict[str, Tuple[float, float]]],
+) -> Tuple[Optional[float], Optional[float], bool]:
+    node = node_lookup.get((agent_id, timestamp))
+    if node is not None and node.get("x") is not None and node.get("y") is not None:
+        return node["x"], node["y"], False
+
+    positions = agent_positions_by_timestamp.get(agent_id, {})
+    if not positions:
+        return None, None, False
+
+    if "T_peak" in positions:
+        x, y = positions["T_peak"]
+        return x, y, True
+
+    for label in TIMESTAMPS:
+        if label in positions:
+            x, y = positions[label]
+            return x, y, True
+
+    return None, None, False
+
+
 def _build_info_html(event_payload: Dict[str, Any], timestamp: str) -> str:
     window = event_payload["episode_window"]
     return (
         f"<b>Event</b>: {event_payload['event_id']}<br>"
         f"<b>Scene</b>: {event_payload['scene_name']} ({event_payload['env_name']})<br>"
         f"<b>Ego</b>: {event_payload['ego_agent_id']}<br>"
+        f"<b>Primary Risk Agents</b>: {', '.join(event_payload['primary_risk_agent_ids'])}<br>"
+        f"<b>Peak Metric</b>: {event_payload.get('peak_metric_type') or 'n/a'}"
+        f" ({event_payload.get('peak_metric_value')})<br>"
+        f"<b>Start Rule</b>: {event_payload.get('start_rule') or 'n/a'}<br>"
+        f"<b>End Rule</b>: {event_payload.get('end_rule') or 'n/a'}<br>"
         f"<b>Episode Type</b>: {event_payload['episode_type']}<br>"
         f"<b>Risk Score</b>: {event_payload['risk_score']:.4f}<br>"
         f"<b>Timestamp</b>: {timestamp}<br>"
@@ -262,8 +379,7 @@ def _build_info_html(event_payload: Dict[str, Any], timestamp: str) -> str:
     )
 
 
-def create_interactive_document(events: Dict[str, Dict], initial_event_id: str):
-    cache_path = Path.home() / ".unified_data_cache"
+def create_interactive_document(events: Dict[str, Dict], initial_event_id: str, cache_path: Path):
     event_payloads = {event_id: _build_event_payload(payload) for event_id, payload in events.items()}
     map_payloads = {event_id: _build_map_payload(payload, cache_path) for event_id, payload in events.items()}
     current_payload = event_payloads[initial_event_id]
@@ -273,6 +389,8 @@ def create_interactive_document(events: Dict[str, Dict], initial_event_id: str):
         "xs",
         "ys",
         "agent_id",
+        "display_id",
+        "agent_role",
         "type",
         "speed_mps",
         "speed_kph",
@@ -284,11 +402,25 @@ def create_interactive_document(events: Dict[str, Dict], initial_event_id: str):
         "x",
         "y",
     ]
+    point_fields = [
+        "x",
+        "y",
+        "agent_id",
+        "display_id",
+        "agent_role",
+        "type",
+        "speed_mps",
+        "speed_kph",
+        "heading",
+        "raw_timestep",
+        "fill_color",
+    ]
     dir_fields = ["xs", "ys", "fill_color", "line_color", "fill_alpha"]
-    edge_fields = ["x0", "y0", "x1", "y1", "source_id", "target_id", "relation", "weight", "color", "line_width", "edge_type", "timestamp_pair", "details"]
-    traj_fields = ["xs", "ys", "line_color", "agent_id", "type"]
+    edge_fields = ["x0", "y0", "x1", "y1", "source_id", "target_id", "relation", "weight", "color", "line_width", "edge_type", "edge_status", "line_alpha", "line_dash", "source_is_ghost", "target_is_ghost", "timestamp_pair", "details"]
+    traj_fields = ["xs", "ys", "line_color", "agent_id", "agent_role", "type"]
 
     rect_source = ColumnDataSource(_columns_from_records(current_payload["nodes_by_timestamp"][current_timestamp], rect_fields))
+    point_source = ColumnDataSource(_columns_from_records(current_payload["nodes_by_timestamp"][current_timestamp], point_fields))
     dir_source = ColumnDataSource(
         {
             "xs": [record["dir_xs"] for record in current_payload["nodes_by_timestamp"][current_timestamp]],
@@ -386,8 +518,8 @@ def create_interactive_document(events: Dict[str, Dict], initial_event_id: str):
             source=edge_sources[edge_type],
             line_color="color",
             line_width="line_width",
-            line_alpha=0.9,
-            line_dash="dashed" if edge_type == "temporal" else "solid",
+            line_alpha="line_alpha",
+            line_dash="line_dash",
         )
         for edge_type in EDGE_TYPES
     }
@@ -401,6 +533,15 @@ def create_interactive_document(events: Dict[str, Dict], initial_event_id: str):
         line_color="line_color",
         line_width=1.0,
     )
+    point_renderer = plot.scatter(
+        x="x",
+        y="y",
+        source=point_source,
+        size=22,
+        line_alpha=0.0,
+        fill_alpha=0.001,
+        fill_color="fill_color",
+    )
     dir_renderer = plot.patches(
         xs="xs",
         ys="ys",
@@ -410,12 +551,26 @@ def create_interactive_document(events: Dict[str, Dict], initial_event_id: str):
         line_color="line_color",
         line_width=0.8,
     )
+    label_renderer = LabelSet(
+        x="x",
+        y="y",
+        text="display_id",
+        source=point_source,
+        text_font_size="8pt",
+        text_color="#111111",
+        x_offset=5,
+        y_offset=5,
+        background_fill_color="#ffffff",
+        background_fill_alpha=0.65,
+    )
+    plot.add_layout(label_renderer)
 
     plot.add_tools(
         HoverTool(
-            renderers=[rect_renderer],
+            renderers=[point_renderer],
             tooltips=[
                 ("agent", "@agent_id"),
+                ("role", "@agent_role"),
                 ("type", "@type"),
                 ("position", "(@x{0.00}, @y{0.00})"),
                 ("speed", "@speed_mps{0.00} m/s (@speed_kph{0.0} km/h)"),
@@ -427,7 +582,7 @@ def create_interactive_document(events: Dict[str, Dict], initial_event_id: str):
     plot.add_tools(
         HoverTool(
             renderers=[traj_renderer],
-            tooltips=[("agent", "@agent_id"), ("type", "@type")],
+            tooltips=[("agent", "@agent_id"), ("role", "@agent_role"), ("type", "@type")],
         )
     )
     for edge_type, renderer in edge_renderers.items():
@@ -438,6 +593,8 @@ def create_interactive_document(events: Dict[str, Dict], initial_event_id: str):
                     ("edge_type", edge_type),
                     ("agents", "@source_id -> @target_id"),
                     ("relation", "@relation"),
+                    ("status", "@edge_status"),
+                    ("ghost", "@source_is_ghost -> @target_is_ghost"),
                     ("weight", "@weight{0.000}"),
                     ("timestamps", "@timestamp_pair"),
                     ("details", "@details"),
@@ -455,9 +612,11 @@ def create_interactive_document(events: Dict[str, Dict], initial_event_id: str):
             "walkways: pedestrian areas<br>"
             "lane_centers: lane centerlines<br><br>"
             "<b>Scene Layers</b><br>"
-            "trajectories: semantic keyframe traces<br>"
-            "agents: vehicle/pedestrian extents + heading markers<br>"
-            "edges: spatial / temporal / causal relations"
+            "trajectories: ego + primary risk only<br>"
+            "agents: ego / primary highlighted, secondary faded<br>"
+            "spatial: active solid, outside_roi dashed<br>"
+            "out_of_scene spatial: kept in JSON, not drawable<br>"
+            "temporal / causal: full graph relations"
         ),
         width=360,
         height=220,
@@ -471,13 +630,14 @@ def create_interactive_document(events: Dict[str, Dict], initial_event_id: str):
     )
     timestamp_select = Select(title="Timestamp", value=current_timestamp, options=TIMESTAMPS, width=180)
     map_checkbox = CheckboxGroup(labels=MAP_LAYERS, active=[0, 1, 2, 3, 4], width=320)
-    scene_checkbox = CheckboxGroup(labels=["trajectories", "agents"] + EDGE_TYPES, active=[0, 1, 2, 3, 4], width=320)
+    scene_checkbox = CheckboxGroup(labels=["trajectories", "agents"] + EDGE_TYPES, active=[1, 2, 4], width=320)
 
     callback = CustomJS(
         args=dict(
             events=event_payloads,
             maps=map_payloads,
             rect_source=rect_source,
+            point_source=point_source,
             dir_source=dir_source,
             traj_source=traj_source,
             road_areas_source=map_sources["road_areas"],
@@ -500,7 +660,9 @@ def create_interactive_document(events: Dict[str, Dict], initial_event_id: str):
             lane_centers_renderer=map_renderers["lane_centers"],
             traj_renderer=traj_renderer,
             rect_renderer=rect_renderer,
+            point_renderer=point_renderer,
             dir_renderer=dir_renderer,
+            label_renderer=label_renderer,
             spatial_renderer=edge_renderers["spatial"],
             temporal_renderer=edge_renderers["temporal"],
             causal_renderer=edge_renderers["causal"],
@@ -521,6 +683,7 @@ setData(rect_source, {
   xs: rectRecords.map(r => r.xs),
   ys: rectRecords.map(r => r.ys),
   agent_id: rectRecords.map(r => r.agent_id),
+  agent_role: rectRecords.map(r => r.agent_role),
   type: rectRecords.map(r => r.type),
   speed_mps: rectRecords.map(r => r.speed_mps),
   speed_kph: rectRecords.map(r => r.speed_kph),
@@ -531,6 +694,19 @@ setData(rect_source, {
   fill_alpha: rectRecords.map(r => r.fill_alpha),
   x: rectRecords.map(r => r.x),
   y: rectRecords.map(r => r.y),
+});
+setData(point_source, {
+  x: rectRecords.map(r => r.x),
+  y: rectRecords.map(r => r.y),
+  agent_id: rectRecords.map(r => r.agent_id),
+  display_id: rectRecords.map(r => r.display_id),
+  agent_role: rectRecords.map(r => r.agent_role),
+  type: rectRecords.map(r => r.type),
+  speed_mps: rectRecords.map(r => r.speed_mps),
+  speed_kph: rectRecords.map(r => r.speed_kph),
+  heading: rectRecords.map(r => r.heading),
+  raw_timestep: rectRecords.map(r => r.raw_timestep),
+  fill_color: rectRecords.map(r => r.fill_color),
 });
 setData(dir_source, {
   xs: rectRecords.map(r => r.dir_xs),
@@ -544,6 +720,7 @@ setData(traj_source, {
   ys: eventPayload.trajectories.map(r => r.ys),
   line_color: eventPayload.trajectories.map(r => r.line_color),
   agent_id: eventPayload.trajectories.map(r => r.agent_id),
+  agent_role: eventPayload.trajectories.map(r => r.agent_role),
   type: eventPayload.trajectories.map(r => r.type),
 });
 setData(road_areas_source, mapPayload.road_areas || {xs: [], ys: []});
@@ -565,6 +742,11 @@ const updateEdge = (source, records) => {
     color: records.map(r => r.color),
     line_width: records.map(r => r.line_width),
     edge_type: records.map(r => r.edge_type),
+    edge_status: records.map(r => r.edge_status),
+    line_alpha: records.map(r => r.line_alpha),
+    line_dash: records.map(r => r.line_dash),
+    source_is_ghost: records.map(r => r.source_is_ghost),
+    target_is_ghost: records.map(r => r.target_is_ghost),
     timestamp_pair: records.map(r => r.timestamp_pair),
     details: records.map(r => r.details),
   });
@@ -582,7 +764,9 @@ lane_centers_renderer.visible = map_checkbox.active.includes(4);
 
 traj_renderer.visible = scene_checkbox.active.includes(0);
 rect_renderer.visible = scene_checkbox.active.includes(1);
+point_renderer.visible = scene_checkbox.active.includes(1);
 dir_renderer.visible = scene_checkbox.active.includes(1);
+label_renderer.visible = scene_checkbox.active.includes(1);
 spatial_renderer.visible = scene_checkbox.active.includes(2);
 temporal_renderer.visible = scene_checkbox.active.includes(3);
 causal_renderer.visible = scene_checkbox.active.includes(4);
@@ -598,6 +782,10 @@ info_div.text =
   `<b>Event</b>: ${eventPayload.event_id}<br>` +
   `<b>Scene</b>: ${eventPayload.scene_name} (${eventPayload.env_name})<br>` +
   `<b>Ego</b>: ${eventPayload.ego_agent_id}<br>` +
+  `<b>Primary Risk Agents</b>: ${eventPayload.primary_risk_agent_ids.join(", ")}<br>` +
+  `<b>Peak Metric</b>: ${(eventPayload.peak_metric_type || "n/a")} (${eventPayload.peak_metric_value ?? "n/a"})<br>` +
+  `<b>Start Rule</b>: ${(eventPayload.start_rule || "n/a")}<br>` +
+  `<b>End Rule</b>: ${(eventPayload.end_rule || "n/a")}<br>` +
   `<b>Episode Type</b>: ${eventPayload.episode_type}<br>` +
   `<b>Risk Score</b>: ${eventPayload.risk_score.toFixed(4)}<br>` +
   `<b>Timestamp</b>: ${timestamp}<br>` +
@@ -623,6 +811,7 @@ def main() -> None:
     parser.add_argument("--event-id", type=str, default=None)
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--html", type=str, default=None)
+    parser.add_argument("--cache-path", type=str, default=None)
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -642,9 +831,13 @@ def main() -> None:
     if initial_event_id not in events:
         raise KeyError(f"Unknown event id: {initial_event_id}")
 
+    default_cache_path = Path(".unified_data_cache")
+    cache_path = Path(args.cache_path) if args.cache_path else (
+        default_cache_path if default_cache_path.exists() else Path.home() / ".unified_data_cache"
+    )
     html_path = Path(args.html) if args.html else output_dir / f"{initial_event_id}_interactive.html"
     output_file(html_path, title=f"Risk Event Viewer - {initial_event_id}")
-    save(create_interactive_document(events, initial_event_id))
+    save(create_interactive_document(events, initial_event_id, cache_path=cache_path))
     print(f"Saved interactive viewer to {html_path}")
 
 

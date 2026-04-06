@@ -175,3 +175,6 @@ Task_intro.md
 
 # Risk mining generated artifacts
 risk_mining/output/
+risk_mining/output_*/
+.unified_data_cache/
+tmp_trajdata_cache_rebuild/
