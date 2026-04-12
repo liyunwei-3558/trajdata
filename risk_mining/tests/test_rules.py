@@ -183,6 +183,8 @@ def build_episode() -> Episode:
     )
 
 
+
+
 def test_rule_registry_register_and_unregister():
     registry = RuleRegistry()
 
@@ -315,6 +317,111 @@ def test_pet_rule_adds_post_encroachment_causal_edge():
     assert causal_edges[0].weight > 0.0
 
 
+def test_pet_rule_filters_far_distance_causal_edge():
+    episode = build_episode()
+    episode.state_snapshots["T_peak"]["agent_1"] = Node(
+        "agent_1",
+        "T_peak",
+        "VEHICLE",
+        (-10.0, 0.0),
+        (0.0, 0.0),
+        position=(50.0, 0.0),
+        heading=np.pi,
+    )
+    episode.metadata.update(
+        {
+            "peak_metric_type": "pet",
+            "peak_metric_value": 1.2,
+            "min_pet": 1.2,
+            "pet_event_threshold": 2.0,
+        }
+    )
+
+    graph = TTCCriticalRule(ttc_threshold=2.5, causal_max_distance_m_for_pet_ttc=25.0).apply(
+        episode,
+        SSTG(scene_id=episode.scene_id, dt=episode.dt),
+    )
+
+    causal_edges = [
+        edge
+        for edge in graph.get_edges_at_timestamp("T_peak")
+        if edge.edge_type == EdgeType.CAUSAL
+    ]
+    assert causal_edges == []
+    assert episode.metadata["causal_metric_filter_results"][0]["reason"] == "distance_threshold_exceeded"
+    assert episode.metadata["causal_metric_filter_results"][0]["target_id"] == "agent_1"
+
+
+def test_tti_rule_adds_intersection_arrival_causal_edge():
+    episode = build_episode()
+    episode.metadata.update(
+        {
+            "peak_metric_type": "tti",
+            "peak_metric_value": 1.1,
+            "min_tti": 1.1,
+            "tti_event_threshold": 2.0,
+        }
+    )
+
+    graph = TTCCriticalRule(ttc_threshold=2.5).apply(
+        episode,
+        SSTG(scene_id=episode.scene_id, dt=episode.dt),
+    )
+
+    causal_edges = [
+        edge
+        for edge in graph.get_edges_at_timestamp("T_peak")
+        if edge.edge_type == EdgeType.CAUSAL
+    ]
+    assert len(causal_edges) == 1
+    assert causal_edges[0].source_id == "ego"
+    assert causal_edges[0].target_id == "agent_1"
+    assert causal_edges[0].relation == "has_intersection_arrival_risk"
+    assert causal_edges[0].metadata["peak_metric_type"] == "tti"
+    assert causal_edges[0].weight > 0.0
+
+
+def test_ttc_rule_filters_far_distance_before_map_filter():
+    episode = Episode(
+        scene_id="env:scene",
+        scene_name="scene",
+        env_name="env",
+        dt=0.1,
+        ego_agent_id="ego",
+        t_start=8,
+        t_peak=10,
+        t_end=12,
+        involved_agents=["ego", "agent_far"],
+        episode_type=EpisodeType.MULTI_METRIC_WINDOW,
+        state_snapshots={
+            "T_peak": {
+                "ego": Node("ego", "T_peak", "VEHICLE", (15.0, 0.0), (0.0, 0.0), position=(0.0, 0.0), heading=0.0),
+                "agent_far": Node(
+                    "agent_far",
+                    "T_peak",
+                    "VEHICLE",
+                    (-15.0, 0.0),
+                    (0.0, 0.0),
+                    position=(40.0, 0.0),
+                    heading=np.pi,
+                ),
+            }
+        },
+        metadata={"peak_metric_type": "ttc", "trigger_agent_id": "agent_far", "trigger_agent_ids": ["agent_far"]},
+    )
+
+    graph = TTCCriticalRule(
+        ttc_threshold=2.5,
+        causal_max_distance_m_for_pet_ttc=25.0,
+        causal_filter_enabled=False,
+    ).apply(episode, SSTG(scene_id=episode.scene_id, dt=episode.dt))
+
+    causal_edges = [edge for edge in graph.get_edges_at_timestamp("T_peak") if edge.edge_type == EdgeType.CAUSAL]
+    assert causal_edges == []
+    assert episode.metadata["ttc_candidate_filter_results"][0]["reason"] == "distance_threshold_exceeded"
+    assert episode.metadata["ttc_candidate_filter_results"][0]["metadata"]["pair_distance_m"] == 40.0
+
+
 def test_dynamics_rule_adds_ego_response_edge_for_trigger_agents():
     episode = build_episode()
     episode.metadata.update(
@@ -340,6 +447,34 @@ def test_dynamics_rule_adds_ego_response_edge_for_trigger_agents():
         ("ego", "agent_chain", "ego_kinematic_response"),
     }
     assert all(edge.metadata["peak_metric_type"] == "dynamics" for edge in causal_edges)
+
+
+def test_spatial_roi_rule_supports_dynamic_semantic_timestamps():
+    episode = build_episode()
+    episode.semantic_timestep_map = {
+        "T_start": 8,
+        "T_peak": 10,
+        "T_mid_1": 11,
+        "T_end": 12,
+    }
+    episode.semantic_timestamp_order = ["T_start", "T_peak", "T_mid_1", "T_end"]
+    episode.state_snapshots["T_mid_1"] = {
+        "ego": Node("ego", "T_mid_1", "VEHICLE", (10.0, 0.0), (0.0, 0.0), position=(15.0, 0.0), heading=0.0),
+        "agent_1": Node("agent_1", "T_mid_1", "VEHICLE", (-8.0, 0.0), (0.0, 0.0), position=(25.0, 0.0), heading=np.pi),
+    }
+
+    graph = SpatialROIRule(roi_radius=20.0).apply(
+        episode,
+        SSTG(scene_id=episode.scene_id, dt=episode.dt),
+    )
+
+    assert graph.timestamps == ["T_start", "T_peak", "T_mid_1", "T_end"]
+    temporal_edges = [
+        edge_data
+        for _, _, _, edge_data in graph.graph.edges(keys=True, data=True)
+        if edge_data["edge_type"] == EdgeType.TEMPORAL.value
+    ]
+    assert len(temporal_edges) == 9
 
 
 def test_ttc_rule_filters_separated_vehicle_lanes():

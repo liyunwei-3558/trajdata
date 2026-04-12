@@ -29,6 +29,7 @@ class PeakMetricType(str, Enum):
     """Peak-selection evidence types."""
 
     PET = "pet"
+    TTI = "tti"
     TTC = "ttc"
     DYNAMICS = "dynamics"
 
@@ -52,14 +53,47 @@ class Episode:
     sstg: Optional[SSTG] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     rule_trace: List[str] = field(default_factory=list)
+    semantic_timestep_map: Dict[str, int] = field(default_factory=dict)
+    semantic_timestamp_order: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.semantic_timestep_map:
+            self.semantic_timestep_map = {
+                "T_start": self.t_start,
+                "T_peak": self.t_peak,
+                "T_end": self.t_end,
+            }
+        else:
+            self.semantic_timestep_map = dict(self.semantic_timestep_map)
+            self.semantic_timestep_map.setdefault("T_start", self.t_start)
+            self.semantic_timestep_map.setdefault("T_peak", self.t_peak)
+            self.semantic_timestep_map.setdefault("T_end", self.t_end)
+
+        if not self.semantic_timestamp_order:
+            self.semantic_timestamp_order = sorted(
+                self.semantic_timestep_map.keys(),
+                key=SSTG._timestamp_sort_key,
+            )
+        else:
+            ordered = [label for label in self.semantic_timestamp_order if label in self.semantic_timestep_map]
+            missing = [
+                label
+                for label in sorted(self.semantic_timestep_map.keys(), key=SSTG._timestamp_sort_key)
+                if label not in ordered
+            ]
+            self.semantic_timestamp_order = ordered + missing
 
     @property
     def semantic_timesteps(self) -> Dict[str, int]:
-        return {"T_start": self.t_start, "T_peak": self.t_peak, "T_end": self.t_end}
+        return {
+            label: self.semantic_timestep_map[label]
+            for label in self.semantic_timestamp_order
+            if label in self.semantic_timestep_map
+        }
 
     @property
     def ordered_timestamps(self) -> List[str]:
-        return ["T_start", "T_peak", "T_end"]
+        return list(self.semantic_timestamp_order)
 
     @property
     def duration_timesteps(self) -> int:
@@ -94,8 +128,9 @@ class Slicer:
 
     METRIC_PRIORITY: Mapping[PeakMetricType, int] = {
         PeakMetricType.PET: 0,
-        PeakMetricType.TTC: 1,
-        PeakMetricType.DYNAMICS: 2,
+        PeakMetricType.TTI: 1,
+        PeakMetricType.TTC: 2,
+        PeakMetricType.DYNAMICS: 3,
     }
 
     def __init__(
@@ -105,6 +140,7 @@ class Slicer:
         ego_motion_threshold: float = 0.5,
         ttc_event_threshold: float = 2.5,
         pet_event_threshold: float = 2.0,
+        tti_event_threshold: float = 2.0,
         ttc_clear_threshold: float = 5.0,
         min_peak_gap_sec: Optional[float] = None,
         max_episodes_per_scene: Optional[int] = 50,
@@ -119,14 +155,29 @@ class Slicer:
         visibility_fov_deg: float = 140.0,
         occlusion_lateral_threshold: float = 2.5,
         pet_prediction_horizon_sec: float = 5.0,
+        tti_prediction_horizon_sec: float = 4.0,
+        tti_conflict_radius: float = 3.0,
+        tti_initial_roi_distance: float = 40.0,
+        tti_min_intersection_angle_deg: float = 25.0,
+        tti_prefilter_enabled: bool = True,
+        tti_prefilter_ratio: float = 0.75,
+        following_filter_enabled: bool = True,
+        following_heading_threshold_deg: float = 20.0,
+        following_lateral_threshold_m: float = 4.0,
+        causal_max_distance_m_for_pet_ttc: float = 25.0,
         stop_speed_threshold: float = 0.1,
         zero_acc_threshold: float = 0.3,
+        enable_pet_peak: bool = True,
+        enable_tti_peak: bool = True,
+        enable_ttc_peak: bool = True,
+        enable_dynamics_peak: bool = True,
     ):
         self.pre_buffer_sec = float(pre_buffer_sec)
         self.post_buffer_sec = float(post_buffer_sec)
         self.ego_motion_threshold = float(ego_motion_threshold)
         self.ttc_event_threshold = float(ttc_event_threshold)
         self.pet_event_threshold = float(pet_event_threshold)
+        self.tti_event_threshold = float(tti_event_threshold)
         self.ttc_clear_threshold = float(ttc_clear_threshold)
         self.min_peak_gap_sec = None if min_peak_gap_sec is None else float(min_peak_gap_sec)
         self.max_episodes_per_scene = (
@@ -143,10 +194,27 @@ class Slicer:
         self.visibility_fov_deg = float(visibility_fov_deg)
         self.occlusion_lateral_threshold = float(occlusion_lateral_threshold)
         self.pet_prediction_horizon_sec = float(pet_prediction_horizon_sec)
+        self.tti_prediction_horizon_sec = float(tti_prediction_horizon_sec)
+        self.tti_conflict_radius = float(tti_conflict_radius)
+        self.tti_initial_roi_distance = float(tti_initial_roi_distance)
+        self.tti_min_intersection_angle_deg = float(tti_min_intersection_angle_deg)
+        self.tti_prefilter_enabled = bool(tti_prefilter_enabled)
+        self.tti_prefilter_ratio = float(max(tti_prefilter_ratio, 1e-3))
+        self.tti_ttc_prefilter_threshold = self.ttc_event_threshold / self.tti_prefilter_ratio
+        self.tti_pet_prefilter_threshold = self.pet_event_threshold / self.tti_prefilter_ratio
+        self.following_filter_enabled = bool(following_filter_enabled)
+        self.following_heading_threshold_deg = float(following_heading_threshold_deg)
+        self.following_lateral_threshold_m = float(following_lateral_threshold_m)
+        self.causal_max_distance_m_for_pet_ttc = float(causal_max_distance_m_for_pet_ttc)
         self.stop_speed_threshold = float(stop_speed_threshold)
         self.zero_acc_threshold = float(zero_acc_threshold)
+        self.enable_pet_peak = bool(enable_pet_peak)
+        self.enable_tti_peak = bool(enable_tti_peak)
+        self.enable_ttc_peak = bool(enable_ttc_peak)
+        self.enable_dynamics_peak = bool(enable_dynamics_peak)
 
     def extract_episodes(self, scene: "Scene", cache: "DataFrameCache") -> List[Episode]:
+        self._tti_cache: Dict[Tuple[str, str, int], Optional[Tuple[float, Tuple[float, float], float, float, float]]] = {}
         if not getattr(scene, "agent_presence", None):
             return []
 
@@ -226,7 +294,7 @@ class Slicer:
                 t_peak=candidate.t_peak,
                 evidence=candidate.evidence,
             )
-            t_start, start_rule = self._find_t_start(
+            t_start, start_rule, start_rule_metadata = self._find_t_start(
                 scene=scene,
                 cache=cache,
                 ego_agent_id=candidate.ego_agent_id,
@@ -245,9 +313,14 @@ class Slicer:
                 stable_duration_ts=stable_duration_ts,
             )
 
+            semantic_timestep_map = self._build_semantic_timestep_map(
+                t_start=t_start,
+                t_peak=candidate.t_peak,
+                t_end=t_end,
+            )
             state_snapshots: Dict[str, Dict[str, Node]] = {}
             involved_agents = {candidate.ego_agent_id, *candidate.trigger_agent_ids}
-            for label, timestep in {"T_start": t_start, "T_peak": candidate.t_peak, "T_end": t_end}.items():
+            for label, timestep in semantic_timestep_map.items():
                 snapshot = self._collect_snapshot(scene, cache, timestep, label)
                 if snapshot:
                     involved_agents.update(snapshot.keys())
@@ -272,21 +345,39 @@ class Slicer:
                 "trigger_track_windows": trigger_track_windows,
                 "min_ttc": candidate.evidence.get("ttc"),
                 "min_pet": candidate.evidence.get("pet"),
+                "min_tti": candidate.evidence.get("tti"),
                 "peak_metric_type": candidate.metric_type.value,
                 "peak_metric_value": candidate.metric_value,
                 "peak_metric_score": risk_score,
                 "peak_selection_reason": candidate.evidence.get("selection_reason", candidate.metric_type.value),
                 "peak_evidence": self._json_safe(candidate.evidence),
                 "semantic_timesteps": {
-                    "T_start": t_start,
-                    "T_peak": candidate.t_peak,
-                    "T_end": t_end,
+                    label: timestep
+                    for label, timestep in semantic_timestep_map.items()
                 },
+                "semantic_timestamp_order": list(semantic_timestep_map.keys()),
+                "semantic_snapshot_count": len(semantic_timestep_map),
                 "start_rule": start_rule,
                 "end_rule": end_rule,
+                "peak_inside_conflict_zone": start_rule_metadata["peak_inside_conflict_zone"],
+                "start_rule_boundary_crossing_suppressed": start_rule_metadata[
+                    "start_rule_boundary_crossing_suppressed"
+                ],
+                "start_rule_boundary_crossing_suppressed_reason": start_rule_metadata[
+                    "start_rule_boundary_crossing_suppressed_reason"
+                ],
                 "ego_motion_threshold": self.ego_motion_threshold,
                 "ttc_event_threshold": self.ttc_event_threshold,
                 "pet_event_threshold": self.pet_event_threshold,
+                "tti_event_threshold": self.tti_event_threshold,
+                "causal_max_distance_m_for_pet_ttc": self.causal_max_distance_m_for_pet_ttc,
+                "tti_prefilter_enabled": self.tti_prefilter_enabled,
+                "tti_prefilter_ratio": self.tti_prefilter_ratio,
+                "tti_ttc_prefilter_threshold": self.tti_ttc_prefilter_threshold,
+                "tti_pet_prefilter_threshold": self.tti_pet_prefilter_threshold,
+                "following_filter_enabled": self.following_filter_enabled,
+                "following_heading_threshold_deg": self.following_heading_threshold_deg,
+                "following_lateral_threshold_m": self.following_lateral_threshold_m,
                 "reaction_latency_sec": self.reaction_latency_sec,
                 "stable_duration_sec": self.stable_duration_sec,
                 "candidate_rank_in_scene": candidate_index,
@@ -312,6 +403,8 @@ class Slicer:
                     episode_type=EpisodeType.MULTI_METRIC_WINDOW,
                     risk_score=risk_score,
                     metadata=metadata,
+                    semantic_timestep_map=semantic_timestep_map,
+                    semantic_timestamp_order=list(semantic_timestep_map.keys()),
                 )
             )
 
@@ -354,8 +447,9 @@ class Slicer:
         if ego_state is None:
             return candidates
 
-        best_ttc: Optional[Tuple[str, float]] = None
         best_pet: Optional[Tuple[str, float, Tuple[float, float], float, float]] = None
+        best_tti: Optional[Tuple[str, float, Tuple[float, float], float, float, float, float]] = None
+        best_ttc: Optional[Tuple[str, float]] = None
         nearest_agent_id: Optional[str] = None
         nearest_distance = float("inf")
 
@@ -371,17 +465,53 @@ class Slicer:
                 nearest_distance = distance
                 nearest_agent_id = agent.name
 
-            ttc = self._compute_ttc(ego_state, other_state)
-            if ttc is not None and ttc < self.ttc_event_threshold:
-                if best_ttc is None or ttc < best_ttc[1]:
-                    best_ttc = (agent.name, ttc)
+            if self.following_filter_enabled and self._is_following_behavior(ego_state, other_state):
+                continue
 
-            pet = self._compute_pet(ego_state, other_state, scene.dt)
-            if pet is not None and pet[0] < self.pet_event_threshold:
-                if best_pet is None or pet[0] < best_pet[1]:
-                    best_pet = (agent.name, pet[0], pet[1], pet[2], pet[3])
+            needs_ttc = self.enable_ttc_peak or (self.enable_tti_peak and self.tti_prefilter_enabled)
+            needs_pet = self.enable_pet_peak or (self.enable_tti_peak and self.tti_prefilter_enabled)
+            within_causal_distance = distance <= self.causal_max_distance_m_for_pet_ttc
 
-        if best_pet is not None:
+            ttc: Optional[float] = None
+            if needs_ttc:
+                ttc = self._compute_ttc(ego_state, other_state)
+                if (
+                    ttc is not None
+                    and within_causal_distance
+                    and ttc < self.ttc_event_threshold
+                ):
+                    if best_ttc is None or ttc < best_ttc[1]:
+                        best_ttc = (agent.name, ttc)
+
+            pet: Optional[Tuple[float, Tuple[float, float], float, float]] = None
+            if needs_pet:
+                pet = self._compute_pet(ego_state, other_state, scene.dt)
+                if (
+                    pet is not None
+                    and within_causal_distance
+                    and pet[0] < self.pet_event_threshold
+                ):
+                    if best_pet is None or pet[0] < best_pet[1]:
+                        best_pet = (agent.name, pet[0], pet[1], pet[2], pet[3])
+
+            if self.enable_tti_peak:
+                if self.tti_prefilter_enabled:
+                    relaxed_ttc_pass = ttc is not None and ttc < self.tti_ttc_prefilter_threshold
+                    relaxed_pet_pass = pet is not None and pet[0] < self.tti_pet_prefilter_threshold
+                    if not (relaxed_ttc_pass or relaxed_pet_pass):
+                        continue
+                tti = self._compute_tti(
+                    cache=cache,
+                    ego_agent_id=ego_agent.name,
+                    other_agent_id=agent.name,
+                    scene_ts=scene_ts,
+                    dt=scene.dt,
+                )
+                if tti is not None and tti[0] < self.tti_event_threshold:
+                    if best_tti is None or tti[0] < best_tti[1]:
+                        best_tti = (agent.name, tti[0], tti[1], tti[2], tti[3], tti[4], distance)
+
+        if self.enable_pet_peak and best_pet is not None:
             agent_id, pet_value, conflict_point, ego_arrival, trigger_arrival = best_pet
             candidates.append(
                 PeakCandidate(
@@ -402,7 +532,44 @@ class Slicer:
                 )
             )
 
-        if best_ttc is not None:
+        if best_tti is not None:
+            agent_id, tti_value, conflict_point, ego_arrival, trigger_arrival, heading_diff_deg, current_distance = best_tti
+            tti_score = max(0.0, 1.0 - tti_value / max(self.tti_event_threshold, 1e-6))
+            urgency_score = max(
+                0.0,
+                1.0 - max(ego_arrival, trigger_arrival) / max(self.tti_prediction_horizon_sec, 1e-6),
+            )
+            proximity_score = max(
+                0.0,
+                1.0 - current_distance / max(self.tti_initial_roi_distance, 1e-6),
+            )
+            candidates.append(
+                PeakCandidate(
+                    ego_agent_id=ego_agent.name,
+                    trigger_agent_ids=(agent_id,),
+                    t_peak=scene_ts,
+                    metric_type=PeakMetricType.TTI,
+                    metric_value=tti_value,
+                    risk_score=float(np.clip(0.6 * tti_score + 0.25 * urgency_score + 0.15 * proximity_score, 0.0, 1.0)),
+                    evidence={
+                        "tti": tti_value,
+                        "conflict_point": conflict_point,
+                        "ego_arrival_sec": ego_arrival,
+                        "trigger_arrival_sec": trigger_arrival,
+                        "trajectory_intersection_angle_deg": heading_diff_deg,
+                        "current_agent_distance_m": current_distance,
+                        "tti_prefilter": {
+                            "enabled": self.tti_prefilter_enabled,
+                            "ttc_threshold": self.tti_ttc_prefilter_threshold,
+                            "pet_threshold": self.tti_pet_prefilter_threshold,
+                        },
+                        "selection_reason": "tti_future_trajectory_conflict",
+                        "conflict_zone_source": "tti_future_overlap_heuristic",
+                    },
+                )
+            )
+
+        if self.enable_ttc_peak and best_ttc is not None:
             agent_id, ttc_value = best_ttc
             candidates.append(
                 PeakCandidate(
@@ -420,16 +587,18 @@ class Slicer:
                 )
             )
 
-        dynamics_candidate = self._compute_dynamics_candidate(
-            scene=scene,
-            cache=cache,
-            ego_agent=ego_agent,
-            ego_state=ego_state,
-            scene_ts=scene_ts,
-            nearest_agent_id=nearest_agent_id,
-            best_ttc_agent_id=best_ttc[0] if best_ttc is not None else None,
-            best_pet_agent_id=best_pet[0] if best_pet is not None else None,
-        )
+        dynamics_candidate = None
+        if self.enable_dynamics_peak:
+            dynamics_candidate = self._compute_dynamics_candidate(
+                scene=scene,
+                cache=cache,
+                ego_agent=ego_agent,
+                ego_state=ego_state,
+                scene_ts=scene_ts,
+                nearest_agent_id=nearest_agent_id,
+                best_ttc_agent_id=best_ttc[0] if best_ttc is not None else None,
+                best_pet_agent_id=(best_pet or best_tti)[0] if (best_pet is not None or best_tti is not None) else None,
+            )
         if dynamics_candidate is not None:
             candidates.append(dynamics_candidate)
 
@@ -522,18 +691,92 @@ class Slicer:
         t_peak: int,
         reaction_latency_ts: int,
         conflict_center: Optional[Tuple[float, float]],
-    ) -> Tuple[int, str]:
+    ) -> Tuple[int, str, Dict[str, Any]]:
         search_floor = max(0, t_peak - max(reaction_latency_ts * 4, 1))
+        suppression_metadata = self._get_boundary_crossing_suppression_metadata(
+            cache=cache,
+            ego_agent_id=ego_agent_id,
+            trigger_agent_ids=trigger_agent_ids,
+            t_peak=t_peak,
+            conflict_center=conflict_center,
+        )
         for timestep in range(t_peak, search_floor, -1):
             for trigger_agent_id in trigger_agent_ids:
                 if self._detect_topological_flip(scene, cache, ego_agent_id, trigger_agent_id, timestep):
-                    return timestep, "topological_flip_heuristic"
-                if self._detect_boundary_crossing(cache, trigger_agent_id, timestep, conflict_center):
-                    return timestep, "boundary_crossing_heuristic"
+                    return timestep, "topological_flip_heuristic", suppression_metadata
+                if (
+                    not suppression_metadata["start_rule_boundary_crossing_suppressed"]
+                    and self._detect_boundary_crossing(cache, trigger_agent_id, timestep, conflict_center)
+                ):
+                    return timestep, "boundary_crossing_heuristic", suppression_metadata
                 if self._detect_intent_mutation(cache, trigger_agent_id, timestep):
-                    return timestep, "intent_mutation"
+                    return timestep, "intent_mutation", suppression_metadata
 
-        return max(0, t_peak - reaction_latency_ts), "fallback_latency"
+        return max(0, t_peak - reaction_latency_ts), "fallback_latency", suppression_metadata
+
+    def _build_semantic_timestep_map(
+        self,
+        t_start: int,
+        t_peak: int,
+        t_end: int,
+    ) -> Dict[str, int]:
+        semantic_points: List[Tuple[str, int]] = [("T_start", t_start), ("T_peak", t_peak)]
+        peak_to_end_gap = max(0, t_end - t_peak)
+        mid_timesteps: List[int] = []
+        if 51 <= peak_to_end_gap <= 100:
+            mid_timesteps = [t_peak + peak_to_end_gap // 2]
+        elif peak_to_end_gap > 100:
+            mid_timesteps = [
+                t_peak + peak_to_end_gap // 3,
+                t_peak + (2 * peak_to_end_gap) // 3,
+            ]
+
+        deduped_mid_timesteps: List[int] = []
+        for timestep in mid_timesteps:
+            if t_peak < timestep < t_end and timestep not in deduped_mid_timesteps:
+                deduped_mid_timesteps.append(timestep)
+
+        for index, timestep in enumerate(deduped_mid_timesteps, start=1):
+            semantic_points.append((f"T_mid_{index}", timestep))
+        semantic_points.append(("T_end", t_end))
+        return dict(semantic_points)
+
+    def _get_boundary_crossing_suppression_metadata(
+        self,
+        cache: "DataFrameCache",
+        ego_agent_id: str,
+        trigger_agent_ids: Sequence[str],
+        t_peak: int,
+        conflict_center: Optional[Tuple[float, float]],
+    ) -> Dict[str, Any]:
+        if conflict_center is None:
+            return {
+                "peak_inside_conflict_zone": False,
+                "start_rule_boundary_crossing_suppressed": False,
+                "start_rule_boundary_crossing_suppressed_reason": None,
+            }
+
+        peak_inside_conflict_zone = False
+        ego_state = self._safe_get_state(cache, ego_agent_id, t_peak)
+        if ego_state is not None and self._is_in_conflict_zone(ego_state, conflict_center):
+            peak_inside_conflict_zone = True
+        else:
+            for trigger_agent_id in trigger_agent_ids:
+                trigger_state = self._safe_get_state(cache, trigger_agent_id, t_peak)
+                if trigger_state is not None and self._is_in_conflict_zone(trigger_state, conflict_center):
+                    peak_inside_conflict_zone = True
+                    break
+
+        suppressed_reason = (
+            "peak_agent_already_inside_conflict_zone"
+            if peak_inside_conflict_zone
+            else None
+        )
+        return {
+            "peak_inside_conflict_zone": peak_inside_conflict_zone,
+            "start_rule_boundary_crossing_suppressed": peak_inside_conflict_zone,
+            "start_rule_boundary_crossing_suppressed_reason": suppressed_reason,
+        }
 
     def _find_t_end(
         self,
@@ -552,7 +795,7 @@ class Slicer:
                 break
 
             if all(
-                self._is_risk_clear(cache, ego_agent_id, trigger_agent_ids, check_ts)
+                self._is_risk_clear(scene, cache, ego_agent_id, trigger_agent_ids, check_ts)
                 for check_ts in range(timestep, window_end + 1)
             ):
                 return window_end, "risk_clear"
@@ -767,6 +1010,7 @@ class Slicer:
 
     def _is_risk_clear(
         self,
+        scene: "Scene",
         cache: "DataFrameCache",
         ego_agent_id: str,
         trigger_agent_ids: Sequence[str],
@@ -783,12 +1027,20 @@ class Slicer:
 
             ttc = self._compute_ttc(ego_state, trigger_state)
             pet = self._compute_pet(ego_state, trigger_state, 0.1)
+            tti = self._compute_tti(
+                cache=cache,
+                ego_agent_id=ego_agent_id,
+                other_agent_id=trigger_agent_id,
+                scene_ts=timestep,
+                dt=scene.dt,
+            )
             rel_position = self._state_position(trigger_state) - self._state_position(ego_state)
             rel_velocity = self._state_velocity(trigger_state) - self._state_velocity(ego_state)
             distancing = float(np.dot(rel_position, rel_velocity)) > 0.0
             ttc_clear = ttc is None or ttc > self.ttc_clear_threshold
             pet_clear = pet is None or pet[0] > self.pet_event_threshold
-            if not ((ttc_clear and pet_clear and distancing) or float(np.linalg.norm(rel_position)) > self.forward_roi_distance):
+            tti_clear = tti is None or tti[0] > self.tti_event_threshold
+            if not ((ttc_clear and pet_clear and tti_clear and distancing) or float(np.linalg.norm(rel_position)) > self.forward_roi_distance):
                 return False
 
         return True
@@ -910,6 +1162,69 @@ class Slicer:
             float(other_arrival),
         )
 
+    def _compute_tti(
+        self,
+        cache: "DataFrameCache",
+        ego_agent_id: str,
+        other_agent_id: str,
+        scene_ts: int,
+        dt: float,
+    ) -> Optional[Tuple[float, Tuple[float, float], float, float, float]]:
+        cache_key = (ego_agent_id, other_agent_id, scene_ts)
+        if hasattr(self, "_tti_cache") and cache_key in self._tti_cache:
+            return self._tti_cache[cache_key]
+
+        ego_state = self._safe_get_state(cache, ego_agent_id, scene_ts)
+        other_state = self._safe_get_state(cache, other_agent_id, scene_ts)
+        if ego_state is None or other_state is None:
+            return self._cache_tti(cache_key, None)
+
+        if self._state_distance(ego_state, other_state) > self.tti_initial_roi_distance:
+            return self._cache_tti(cache_key, None)
+
+        horizon_ts = max(1, int(round(self.tti_prediction_horizon_sec / max(dt, 1e-6))))
+        ego_future = np.asarray(self._collect_future_trajectory(cache, ego_agent_id, scene_ts, horizon_ts), dtype=float)
+        other_future = np.asarray(self._collect_future_trajectory(cache, other_agent_id, scene_ts, horizon_ts), dtype=float)
+        if len(ego_future) < 2 or len(other_future) < 2:
+            return self._cache_tti(cache_key, None)
+
+        ego_headings = np.asarray(self._trajectory_headings(ego_future), dtype=float)
+        other_headings = np.asarray(self._trajectory_headings(other_future), dtype=float)
+
+        deltas = ego_future[:, None, :] - other_future[None, :, :]
+        distance_matrix = np.linalg.norm(deltas, axis=-1)
+        heading_diff_matrix = np.abs(
+            np.degrees(
+                np.arctan2(
+                    np.sin(ego_headings[:, None] - other_headings[None, :]),
+                    np.cos(ego_headings[:, None] - other_headings[None, :]),
+                )
+            )
+        )
+        valid_mask = (
+            (distance_matrix <= self.tti_conflict_radius)
+            & (heading_diff_matrix >= self.tti_min_intersection_angle_deg)
+            & (heading_diff_matrix <= 180.0 - self.tti_min_intersection_angle_deg)
+        )
+        valid_indices = np.argwhere(valid_mask)
+        if valid_indices.size == 0:
+            return self._cache_tti(cache_key, None)
+
+        arrival_diffs = np.abs(valid_indices[:, 0] - valid_indices[:, 1]) * dt
+        distances = distance_matrix[valid_mask]
+        tie_breakers = np.minimum(valid_indices[:, 0], valid_indices[:, 1]) * dt
+        order = np.lexsort((tie_breakers, distances, arrival_diffs))
+        best_ego_index, best_other_index = valid_indices[order[0]]
+        conflict_point = (ego_future[best_ego_index] + other_future[best_other_index]) / 2.0
+        result = (
+            float(max(arrival_diffs[order[0]], dt)),
+            (float(conflict_point[0]), float(conflict_point[1])),
+            float(best_ego_index * dt),
+            float(best_other_index * dt),
+            float(heading_diff_matrix[best_ego_index, best_other_index]),
+        )
+        return self._cache_tti(cache_key, result)
+
     @staticmethod
     def _compute_ttc(ego_state: Any, other_state: Any) -> Optional[float]:
         ego_position = np.asarray(getattr(ego_state, "position", (0.0, 0.0)), dtype=float).reshape(-1)[:2]
@@ -929,6 +1244,81 @@ class Slicer:
 
         distance = float(np.linalg.norm(rel_position))
         return distance / closing_speed if closing_speed > 0 else None
+
+    def _collect_future_trajectory(
+        self,
+        cache: "DataFrameCache",
+        agent_id: str,
+        scene_ts: int,
+        horizon_ts: int,
+    ) -> List[np.ndarray]:
+        positions: List[np.ndarray] = []
+        for timestep in range(scene_ts, scene_ts + horizon_ts + 1):
+            state = self._safe_get_state(cache, agent_id, timestep)
+            if state is None:
+                break
+            positions.append(self._state_position(state))
+        return positions
+
+    def _trajectory_headings(self, positions: Sequence[np.ndarray]) -> List[float]:
+        if len(positions) == 0:
+            return []
+        if len(positions) == 1:
+            return [0.0]
+
+        headings: List[float] = []
+        for index, position in enumerate(positions):
+            if index == len(positions) - 1:
+                delta = position - positions[index - 1]
+            else:
+                delta = positions[index + 1] - position
+            if float(np.linalg.norm(delta)) < 1e-6:
+                if headings:
+                    headings.append(headings[-1])
+                else:
+                    headings.append(0.0)
+                continue
+            headings.append(float(math.atan2(float(delta[1]), float(delta[0]))))
+        return headings
+
+    def _cache_tti(
+        self,
+        cache_key: Tuple[str, str, int],
+        result: Optional[Tuple[float, Tuple[float, float], float, float, float]],
+    ) -> Optional[Tuple[float, Tuple[float, float], float, float, float]]:
+        if hasattr(self, "_tti_cache"):
+            self._tti_cache[cache_key] = result
+        return result
+
+    def _absolute_angle_diff_deg(self, angle_a: float, angle_b: float) -> float:
+        return abs(math.degrees(math.atan2(math.sin(angle_a - angle_b), math.cos(angle_a - angle_b))))
+
+    def _is_following_behavior(self, ego_state: Any, other_state: Any) -> bool:
+        ego_heading = self._motion_heading(ego_state)
+        other_heading = self._motion_heading(other_state)
+        heading_diff_deg = self._absolute_angle_diff_deg(ego_heading, other_heading)
+        if heading_diff_deg > self.following_heading_threshold_deg:
+            return False
+
+        ego_position = self._state_position(ego_state)
+        other_position = self._state_position(other_state)
+        delta = other_position - ego_position
+        direction = np.asarray([math.cos(ego_heading), math.sin(ego_heading)], dtype=float)
+        lateral_direction = np.asarray([-direction[1], direction[0]], dtype=float)
+        longitudinal = float(np.dot(delta, direction))
+        lateral = abs(float(np.dot(delta, lateral_direction)))
+
+        if lateral > self.following_lateral_threshold_m:
+            return False
+        if abs(longitudinal) <= lateral:
+            return False
+        return True
+
+    def _motion_heading(self, state: Any) -> float:
+        velocity = self._state_velocity(state)
+        if float(np.linalg.norm(velocity)) >= self.ego_motion_threshold:
+            return float(math.atan2(float(velocity[1]), float(velocity[0])))
+        return self._state_heading(state)
 
     @staticmethod
     def _agent_type_name(agent: Any) -> str:

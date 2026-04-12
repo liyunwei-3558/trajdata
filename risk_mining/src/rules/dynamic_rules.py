@@ -417,6 +417,7 @@ class TTCCriticalRule(BaseRule):
         *,
         map_cache_path: Optional[Path] = None,
         map_api: Optional[Any] = None,
+        causal_max_distance_m_for_pet_ttc: float = 25.0,
         causal_filter_enabled: bool = True,
         lane_constrained_types: Optional[Sequence[str]] = None,
         current_lane_max_dist: float = 2.5,
@@ -432,6 +433,7 @@ class TTCCriticalRule(BaseRule):
     ):
         super().__init__(name="ttc_critical", enabled=enabled)
         self.ttc_threshold = float(ttc_threshold)
+        self.causal_max_distance_m_for_pet_ttc = float(causal_max_distance_m_for_pet_ttc)
         self.map_filter = TTCMapPlausibilityFilter(
             enabled=causal_filter_enabled,
             map_cache_path=map_cache_path,
@@ -470,19 +472,30 @@ class TTCCriticalRule(BaseRule):
         if peak_metric_type == "ttc":
             return self._apply_ttc_rule(episode, current_graph, ego_node, peak_timestamp)
 
-        relation = "has_post_encroachment_risk" if peak_metric_type == "pet" else "ego_kinematic_response"
-        metric_key = "min_pet" if peak_metric_type == "pet" else "peak_metric_value"
+        relation = "ego_kinematic_response"
+        metric_key = "peak_metric_value"
+        if peak_metric_type == "pet":
+            relation = "has_post_encroachment_risk"
+            metric_key = "min_pet"
+        elif peak_metric_type == "tti":
+            relation = "has_intersection_arrival_risk"
+            metric_key = "min_tti"
         metric_value = episode.metadata.get(metric_key)
         metric_threshold = (
             episode.metadata.get("pet_event_threshold")
             if peak_metric_type == "pet"
+            else episode.metadata.get("tti_event_threshold")
+            if peak_metric_type == "tti"
             else max(self.ttc_threshold, 1.0)
         )
         weight = 1.0
         if isinstance(metric_value, (float, int)) and isinstance(metric_threshold, (float, int)):
             threshold = max(float(metric_threshold), 1e-6)
             value = float(metric_value)
-            weight = max(0.0, min(1.0, 1.0 - value / threshold)) if peak_metric_type == "pet" else max(0.2, min(1.0, value / threshold))
+            if peak_metric_type in {"pet", "tti"}:
+                weight = max(0.0, min(1.0, 1.0 - value / threshold))
+            else:
+                weight = max(0.2, min(1.0, value / threshold))
 
         for agent_id in trigger_agent_ids:
             node = current_graph.get_node(agent_id, peak_timestamp)
@@ -492,6 +505,18 @@ class TTCCriticalRule(BaseRule):
                 continue
             if not current_graph.has_node(node.agent_id, peak_timestamp):
                 current_graph.add_node(node)
+
+            pair_distance = self._pair_distance(ego_node, node)
+            if peak_metric_type == "pet" and pair_distance > self.causal_max_distance_m_for_pet_ttc:
+                self._record_metric_distance_filter(
+                    episode=episode,
+                    current_graph=current_graph,
+                    peak_metric_type=peak_metric_type,
+                    target_id=node.agent_id,
+                    pair_distance=pair_distance,
+                    threshold=self.causal_max_distance_m_for_pet_ttc,
+                )
+                continue
 
             current_graph.add_edge(
                 Edge(
@@ -506,6 +531,7 @@ class TTCCriticalRule(BaseRule):
                         "peak_metric_type": peak_metric_type,
                         "peak_metric_value": metric_value,
                         "threshold": metric_threshold,
+                        "pair_distance_m": pair_distance,
                     },
                 )
             )
@@ -540,6 +566,23 @@ class TTCCriticalRule(BaseRule):
             if ttc is None or ttc >= self.ttc_threshold:
                 continue
 
+            pair_distance = self._pair_distance(ego_node, node)
+            if pair_distance > self.causal_max_distance_m_for_pet_ttc:
+                filtered_pairs.append(
+                    {
+                        "target_id": node.agent_id,
+                        "ttc": ttc,
+                        "allow_causal": False,
+                        "reason": "distance_threshold_exceeded",
+                        "manual_review": False,
+                        "metadata": {
+                            "pair_distance_m": pair_distance,
+                            "distance_threshold_m": self.causal_max_distance_m_for_pet_ttc,
+                        },
+                    }
+                )
+                continue
+
             decision = self.map_filter.evaluate_pair(episode, ego_node, node)
             filtered_pairs.append(
                 {
@@ -548,7 +591,11 @@ class TTCCriticalRule(BaseRule):
                     "allow_causal": decision.allow_causal,
                     "reason": decision.reason,
                     "manual_review": decision.send_to_manual_review,
-                    "metadata": decision.metadata,
+                    "metadata": {
+                        **decision.metadata,
+                        "pair_distance_m": pair_distance,
+                        "distance_threshold_m": self.causal_max_distance_m_for_pet_ttc,
+                    },
                 }
             )
 
@@ -571,8 +618,13 @@ class TTCCriticalRule(BaseRule):
                     metadata={
                         "ttc": ttc,
                         "threshold": self.ttc_threshold,
+                        "pair_distance_m": pair_distance,
                         "causal_filter_reason": decision.reason,
-                        "causal_filter_metadata": decision.metadata,
+                        "causal_filter_metadata": {
+                            **decision.metadata,
+                            "pair_distance_m": pair_distance,
+                            "distance_threshold_m": self.causal_max_distance_m_for_pet_ttc,
+                        },
                     },
                 )
             )
@@ -622,6 +674,33 @@ class TTCCriticalRule(BaseRule):
             return None
 
         return float(np.linalg.norm(rel_position)) / closing_rate
+
+    @staticmethod
+    def _pair_distance(ego_node: Node, other_node: Node) -> float:
+        return float(
+            np.linalg.norm(
+                np.asarray(ego_node.position, dtype=float) - np.asarray(other_node.position, dtype=float)
+            )
+        )
+
+    @staticmethod
+    def _record_metric_distance_filter(
+        episode: Episode,
+        current_graph: SSTG,
+        peak_metric_type: str,
+        target_id: str,
+        pair_distance: float,
+        threshold: float,
+    ) -> None:
+        record = {
+            "target_id": target_id,
+            "metric_type": peak_metric_type,
+            "reason": "distance_threshold_exceeded",
+            "pair_distance_m": pair_distance,
+            "distance_threshold_m": threshold,
+        }
+        episode.metadata.setdefault("causal_metric_filter_results", []).append(record)
+        current_graph.metadata.setdefault("causal_metric_filter_results", []).append(record)
 
 
 def register_default_dynamic_rules(registry: RuleRegistry, ttc_threshold: float = 2.5, **kwargs: Any) -> None:

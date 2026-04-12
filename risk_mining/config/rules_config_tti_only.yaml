@@ -1,4 +1,4 @@
-# Risk Mining Pipeline Configuration
+# Risk Mining Pipeline Configuration - TTI only experiment
 
 data:
   desired_data: ["sind-tj"]
@@ -42,7 +42,7 @@ slicer:
   ego_motion_threshold: 0.5
   ttc_event_threshold: 2.5
   pet_event_threshold: 2.0
-  tti_event_threshold: 2.0
+  tti_event_threshold: 2.5
   ttc_clear_threshold: 5.0
   min_peak_gap_sec: 4.0
   max_episodes_per_scene: 50
@@ -69,10 +69,10 @@ slicer:
   causal_max_distance_m_for_pet_ttc: 25.0
   stop_speed_threshold: 0.1
   zero_acc_threshold: 0.3
-  enable_pet_peak: true
+  enable_pet_peak: false
   enable_tti_peak: true
-  enable_ttc_peak: true
-  enable_dynamics_peak: true
+  enable_ttc_peak: false
+  enable_dynamics_peak: false
 
 output:
-  output_dir: "./output"
+  output_dir: "./risk_mining/output/tti_only_experiment"

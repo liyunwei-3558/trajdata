@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,7 +25,6 @@ from trajdata.data_structures.agent import AgentType
 from trajdata.utils import vis_utils
 
 
-TIMESTAMPS = ["T_start", "T_peak", "T_end"]
 EDGE_TYPES = ["spatial", "temporal", "causal"]
 MAP_LAYERS = ["road_areas", "road_lanes", "crosswalks", "walkways", "lane_centers"]
 
@@ -76,6 +76,35 @@ def _agent_type_from_name(type_name: str) -> int:
         return int(AgentType[type_name])
     except Exception:
         return int(AgentType.UNKNOWN)
+
+
+def _timestamp_sort_key(timestamp: str) -> Tuple[int, str]:
+    if timestamp == "T_start":
+        return (0, timestamp)
+    if timestamp == "T_peak":
+        return (1, timestamp)
+    if timestamp == "T_end":
+        return (100, timestamp)
+    mid_match = re.fullmatch(r"T_mid_(\d+)", timestamp)
+    if mid_match is not None:
+        return (10 + int(mid_match.group(1)), timestamp)
+    return (1000, timestamp)
+
+
+def _extract_timestamp_order(raw_event: Dict[str, Any]) -> List[str]:
+    metadata_order = raw_event.get("metadata", {}).get("semantic_timestamp_order")
+    if metadata_order:
+        return list(metadata_order)
+    window = raw_event.get("episode_window", {})
+    return sorted(window.keys(), key=_timestamp_sort_key)
+
+
+def _format_window(window: Dict[str, Any], timestamp_order: List[str]) -> str:
+    return ", ".join(
+        f"{label}={window[label]}"
+        for label in timestamp_order
+        if label in window
+    )
 
 
 def _infer_map_id(raw_event: Dict) -> str | None:
@@ -153,8 +182,9 @@ def _build_agent_geometry(node: Dict[str, Any]) -> Tuple[List[float], List[float
 
 
 def _build_event_payload(raw_event: Dict) -> Dict[str, Any]:
+    timestamp_order = _extract_timestamp_order(raw_event)
     node_lookup: Dict[Tuple[str, str], Dict[str, Any]] = {}
-    nodes_by_timestamp: Dict[str, List[Dict[str, Any]]] = {label: [] for label in TIMESTAMPS}
+    nodes_by_timestamp: Dict[str, List[Dict[str, Any]]] = {label: [] for label in timestamp_order}
     trajectory_points: Dict[str, Dict[str, Any]] = {}
     agent_positions_by_timestamp: Dict[str, Dict[str, Tuple[float, float]]] = {}
     primary_risk_agent_ids = set(raw_event.get("metadata", {}).get("primary_risk_agent_ids", []))
@@ -197,7 +227,7 @@ def _build_event_payload(raw_event: Dict) -> Dict[str, Any]:
             "dir_ys": dir_ys,
         }
         if node.get("position") is not None:
-            nodes_by_timestamp[timestamp].append(record)
+            nodes_by_timestamp.setdefault(timestamp, []).append(record)
             node_lookup[(node["agent_id"], timestamp)] = record
             agent_positions_by_timestamp.setdefault(node["agent_id"], {})[timestamp] = (
                 node["position"][0],
@@ -226,7 +256,7 @@ def _build_event_payload(raw_event: Dict) -> Dict[str, Any]:
             continue
         points_by_timestamp = trajectory["points_by_timestamp"]
         current_segment: List[Tuple[float, float]] = []
-        for timestamp in TIMESTAMPS:
+        for timestamp in timestamp_order:
             point = points_by_timestamp.get(timestamp)
             if point is None:
                 if len(current_segment) >= 2:
@@ -257,7 +287,7 @@ def _build_event_payload(raw_event: Dict) -> Dict[str, Any]:
             )
 
     edges_by_timestamp: Dict[str, Dict[str, List[Dict[str, Any]]]] = {
-        label: {edge_type: [] for edge_type in EDGE_TYPES} for label in TIMESTAMPS
+        label: {edge_type: [] for edge_type in EDGE_TYPES} for label in timestamp_order
     }
     for edge_entry in raw_event["sstg"]["edges"]:
         edge = edge_entry["data"]
@@ -266,12 +296,14 @@ def _build_event_payload(raw_event: Dict) -> Dict[str, Any]:
             timestamp=edge["source_timestamp"],
             node_lookup=node_lookup,
             agent_positions_by_timestamp=agent_positions_by_timestamp,
+            timestamp_order=timestamp_order,
         )
         target_x, target_y, target_ghost = _resolve_edge_endpoint(
             agent_id=edge["target_id"],
             timestamp=edge["target_timestamp"],
             node_lookup=node_lookup,
             agent_positions_by_timestamp=agent_positions_by_timestamp,
+            timestamp_order=timestamp_order,
         )
         if None in (source_x, source_y, target_x, target_y):
             continue
@@ -303,6 +335,8 @@ def _build_event_payload(raw_event: Dict) -> Dict[str, Any]:
             "source_is_ghost": source_ghost,
             "target_is_ghost": target_ghost,
             "timestamp_pair": f"{edge['source_timestamp']} -> {edge['target_timestamp']}",
+            "metric_type": edge.get("metadata", {}).get("peak_metric_type", ""),
+            "metric_value": edge.get("metadata", {}).get("peak_metric_value"),
             "details": json.dumps(edge.get("metadata", {}), ensure_ascii=False),
         }
         for timestamp in {edge["source_timestamp"], edge["target_timestamp"]}:
@@ -322,6 +356,7 @@ def _build_event_payload(raw_event: Dict) -> Dict[str, Any]:
         "start_rule": raw_event.get("metadata", {}).get("start_rule"),
         "end_rule": raw_event.get("metadata", {}).get("end_rule"),
         "episode_window": raw_event["episode_window"],
+        "timestamp_order": timestamp_order,
         "primary_risk_agent_ids": sorted(primary_risk_agent_ids),
         "nodes_by_timestamp": nodes_by_timestamp,
         "edges_by_timestamp": edges_by_timestamp,
@@ -339,6 +374,7 @@ def _resolve_edge_endpoint(
     timestamp: str,
     node_lookup: Dict[Tuple[str, str], Dict[str, Any]],
     agent_positions_by_timestamp: Dict[str, Dict[str, Tuple[float, float]]],
+    timestamp_order: List[str],
 ) -> Tuple[Optional[float], Optional[float], bool]:
     node = node_lookup.get((agent_id, timestamp))
     if node is not None and node.get("x") is not None and node.get("y") is not None:
@@ -352,7 +388,7 @@ def _resolve_edge_endpoint(
         x, y = positions["T_peak"]
         return x, y, True
 
-    for label in TIMESTAMPS:
+    for label in timestamp_order:
         if label in positions:
             x, y = positions[label]
             return x, y, True
@@ -362,6 +398,7 @@ def _resolve_edge_endpoint(
 
 def _build_info_html(event_payload: Dict[str, Any], timestamp: str) -> str:
     window = event_payload["episode_window"]
+    timestamp_order = event_payload.get("timestamp_order", [])
     return (
         f"<b>Event</b>: {event_payload['event_id']}<br>"
         f"<b>Scene</b>: {event_payload['scene_name']} ({event_payload['env_name']})<br>"
@@ -374,7 +411,7 @@ def _build_info_html(event_payload: Dict[str, Any], timestamp: str) -> str:
         f"<b>Episode Type</b>: {event_payload['episode_type']}<br>"
         f"<b>Risk Score</b>: {event_payload['risk_score']:.4f}<br>"
         f"<b>Timestamp</b>: {timestamp}<br>"
-        f"<b>Window</b>: T_start={window['T_start']}, T_peak={window['T_peak']}, T_end={window['T_end']}<br>"
+        f"<b>Window</b>: {_format_window(window, timestamp_order)}<br>"
         f"<b>Rules</b>: {', '.join(event_payload['applied_rules'])}"
     )
 
@@ -383,7 +420,7 @@ def create_interactive_document(events: Dict[str, Dict], initial_event_id: str, 
     event_payloads = {event_id: _build_event_payload(payload) for event_id, payload in events.items()}
     map_payloads = {event_id: _build_map_payload(payload, cache_path) for event_id, payload in events.items()}
     current_payload = event_payloads[initial_event_id]
-    current_timestamp = "T_peak"
+    current_timestamp = "T_peak" if "T_peak" in current_payload["timestamp_order"] else current_payload["timestamp_order"][0]
 
     rect_fields = [
         "xs",
@@ -416,7 +453,7 @@ def create_interactive_document(events: Dict[str, Dict], initial_event_id: str, 
         "fill_color",
     ]
     dir_fields = ["xs", "ys", "fill_color", "line_color", "fill_alpha"]
-    edge_fields = ["x0", "y0", "x1", "y1", "source_id", "target_id", "relation", "weight", "color", "line_width", "edge_type", "edge_status", "line_alpha", "line_dash", "source_is_ghost", "target_is_ghost", "timestamp_pair", "details"]
+    edge_fields = ["x0", "y0", "x1", "y1", "source_id", "target_id", "relation", "weight", "color", "line_width", "edge_type", "edge_status", "line_alpha", "line_dash", "source_is_ghost", "target_is_ghost", "timestamp_pair", "metric_type", "metric_value", "details"]
     traj_fields = ["xs", "ys", "line_color", "agent_id", "agent_role", "type"]
 
     rect_source = ColumnDataSource(_columns_from_records(current_payload["nodes_by_timestamp"][current_timestamp], rect_fields))
@@ -597,6 +634,7 @@ def create_interactive_document(events: Dict[str, Dict], initial_event_id: str, 
                     ("ghost", "@source_is_ghost -> @target_is_ghost"),
                     ("weight", "@weight{0.000}"),
                     ("timestamps", "@timestamp_pair"),
+                    ("metric", "@metric_type (@metric_value)"),
                     ("details", "@details"),
                 ],
             )
@@ -628,7 +666,7 @@ def create_interactive_document(events: Dict[str, Dict], initial_event_id: str, 
         options=[(event_id, f"{event_id} | {payload['source_scene']['scene_name']}") for event_id, payload in events.items()],
         width=360,
     )
-    timestamp_select = Select(title="Timestamp", value=current_timestamp, options=TIMESTAMPS, width=180)
+    timestamp_select = Select(title="Timestamp", value=current_timestamp, options=current_payload["timestamp_order"], width=180)
     map_checkbox = CheckboxGroup(labels=MAP_LAYERS, active=[0, 1, 2, 3, 4], width=320)
     scene_checkbox = CheckboxGroup(labels=["trajectories", "agents"] + EDGE_TYPES, active=[1, 2, 4], width=320)
 
@@ -671,6 +709,11 @@ def create_interactive_document(events: Dict[str, Dict], initial_event_id: str, 
         code="""
 const eventPayload = events[event_select.value];
 const mapPayload = maps[event_select.value];
+const timestampOrder = eventPayload.timestamp_order || [];
+timestamp_select.options = timestampOrder;
+if (!timestampOrder.includes(timestamp_select.value)) {
+  timestamp_select.value = timestampOrder.includes("T_peak") ? "T_peak" : (timestampOrder[0] || "");
+}
 const timestamp = timestamp_select.value;
 
 const setData = (source, data) => {
@@ -748,6 +791,8 @@ const updateEdge = (source, records) => {
     source_is_ghost: records.map(r => r.source_is_ghost),
     target_is_ghost: records.map(r => r.target_is_ghost),
     timestamp_pair: records.map(r => r.timestamp_pair),
+    metric_type: records.map(r => r.metric_type),
+    metric_value: records.map(r => r.metric_value),
     details: records.map(r => r.details),
   });
 };
@@ -778,6 +823,10 @@ plot.y_range.start = bbox[2];
 plot.y_range.end = bbox[3];
 
 const window = eventPayload.episode_window;
+const windowText = (eventPayload.timestamp_order || [])
+  .filter(label => Object.prototype.hasOwnProperty.call(window, label))
+  .map(label => `${label}=${window[label]}`)
+  .join(", ");
 info_div.text =
   `<b>Event</b>: ${eventPayload.event_id}<br>` +
   `<b>Scene</b>: ${eventPayload.scene_name} (${eventPayload.env_name})<br>` +
@@ -789,7 +838,7 @@ info_div.text =
   `<b>Episode Type</b>: ${eventPayload.episode_type}<br>` +
   `<b>Risk Score</b>: ${eventPayload.risk_score.toFixed(4)}<br>` +
   `<b>Timestamp</b>: ${timestamp}<br>` +
-  `<b>Window</b>: T_start=${window.T_start}, T_peak=${window.T_peak}, T_end=${window.T_end}<br>` +
+  `<b>Window</b>: ${windowText}<br>` +
   `<b>Rules</b>: ${eventPayload.applied_rules.join(", ")}`;
 """,
     )

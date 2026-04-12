@@ -4,6 +4,7 @@ Core data structures for Semantic Spatio-Temporal Graphs (SSTG).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
@@ -112,7 +113,7 @@ class Edge:
 class SSTG:
     """Thin wrapper around ``networkx.DiGraph`` with JSON-safe serialization."""
 
-    _DEFAULT_TIMESTAMP_ORDER: Dict[str, int] = {"T_start": 0, "T_peak": 1, "T_end": 2}
+    _DEFAULT_TIMESTAMP_ORDER: Dict[str, int] = {"T_start": 0, "T_peak": 1, "T_end": 100}
 
     def __init__(self, scene_id: str, dt: float, metadata: Optional[Dict[str, Any]] = None):
         self.scene_id = scene_id
@@ -239,4 +240,11 @@ class SSTG:
 
     @classmethod
     def _timestamp_sort_key(cls, timestamp: str) -> Tuple[int, str]:
-        return (cls._DEFAULT_TIMESTAMP_ORDER.get(timestamp, len(cls._DEFAULT_TIMESTAMP_ORDER)), timestamp)
+        if timestamp in cls._DEFAULT_TIMESTAMP_ORDER:
+            return (cls._DEFAULT_TIMESTAMP_ORDER[timestamp], timestamp)
+
+        mid_match = re.fullmatch(r"T_mid_(\d+)", timestamp)
+        if mid_match is not None:
+            return (10 + int(mid_match.group(1)), timestamp)
+
+        return (1000 + len(cls._DEFAULT_TIMESTAMP_ORDER), timestamp)

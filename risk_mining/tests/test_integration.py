@@ -102,7 +102,8 @@ def test_end_to_end_pipeline_with_fake_scene(tmp_path):
     assert episode.episode_type == EpisodeType.MULTI_METRIC_WINDOW
     assert episode.metadata["peak_metric_type"] == "ttc"
     assert episode.metadata["trigger_agent_ids"] == ["agent_1"]
-    assert episode.metadata["start_rule"] == "boundary_crossing_heuristic"
+    assert episode.metadata["start_rule"] == "fallback_latency"
+    assert episode.metadata["start_rule_boundary_crossing_suppressed"] is True
     assert episode.metadata["end_rule"] == "risk_clear"
 
     registry = RuleRegistry()
@@ -258,7 +259,198 @@ def test_slicer_extracts_pet_peak_candidate():
     assert episodes[0].metadata["peak_metric_type"] == "pet"
     assert episodes[0].metadata["trigger_agent_ids"] == ["agent_cross"]
     assert episodes[0].metadata["min_pet"] < 2.0
+
+
+def test_slicer_suppresses_boundary_crossing_when_peak_inside_conflict_zone():
+    ego = FakeAgent("ego", FakeAgentType("VEHICLE"))
+    trigger = FakeAgent("agent_trigger", FakeAgentType("VEHICLE"))
+    scene = FakeScene([ego, trigger], _presence([ego, trigger], 6))
+    cache = FakeCache(
+        {
+            ("ego", 0): FakeState((-3.0, 0.0), (1.0, 0.0)),
+            ("ego", 1): FakeState((-2.0, 0.0), (1.0, 0.0)),
+            ("ego", 2): FakeState((-1.0, 0.0), (1.0, 0.0)),
+            ("ego", 3): FakeState((0.0, 0.0), (1.0, 0.0)),
+            ("ego", 4): FakeState((1.0, 0.0), (1.0, 0.0)),
+            ("ego", 5): FakeState((2.0, 0.0), (1.0, 0.0)),
+            ("agent_trigger", 0): FakeState((13.0, 0.0), (-2.0, 0.0)),
+            ("agent_trigger", 1): FakeState((12.0, 0.0), (-2.0, 0.0)),
+            ("agent_trigger", 2): FakeState((11.0, 0.0), (-2.0, 0.0)),
+            ("agent_trigger", 3): FakeState((10.0, 0.0), (-2.0, 0.0)),
+            ("agent_trigger", 4): FakeState((5.0, 0.0), (-2.0, 0.0)),
+            ("agent_trigger", 5): FakeState((2.0, 0.0), (-2.0, 0.0)),
+        }
+    )
+    slicer = Slicer()
+
+    t_start, start_rule, metadata = slicer._find_t_start(
+        scene=scene,
+        cache=cache,
+        ego_agent_id="ego",
+        trigger_agent_ids=["agent_trigger"],
+        t_peak=4,
+        reaction_latency_ts=2,
+        conflict_center=(3.0, 0.0),
+    )
+
+    assert t_start == 2
+    assert start_rule == "fallback_latency"
+    assert metadata["peak_inside_conflict_zone"] is True
+    assert metadata["start_rule_boundary_crossing_suppressed"] is True
+    assert metadata["start_rule_boundary_crossing_suppressed_reason"] == "peak_agent_already_inside_conflict_zone"
+
+
+def test_slicer_filters_far_ttc_candidate_before_episode_creation():
+    ego = FakeAgent("ego", FakeAgentType("VEHICLE"))
+    other = FakeAgent("agent_far_ttc", FakeAgentType("VEHICLE"))
+    scene = FakeScene([ego, other], _presence([ego, other], 3))
+    states = {
+        ("ego", 0): FakeState((0.0, 0.0), (10.0, 0.0)),
+        ("agent_far_ttc", 0): FakeState((80.0, 0.0), (-10.0, 0.0)),
+        ("ego", 1): FakeState((10.0, 0.0), (10.0, 0.0)),
+        ("agent_far_ttc", 1): FakeState((60.0, 0.0), (-10.0, 0.0)),
+        ("ego", 2): FakeState((20.0, 0.0), (10.0, 0.0)),
+        ("agent_far_ttc", 2): FakeState((50.0, 0.0), (-10.0, 0.0)),
+    }
+
+    episodes = Slicer(
+        ttc_event_threshold=2.5,
+        causal_max_distance_m_for_pet_ttc=25.0,
+        enable_pet_peak=False,
+        enable_tti_peak=False,
+        enable_dynamics_peak=False,
+    ).extract_episodes(scene, FakeCache(states))
+
+    assert episodes == []
+
+
+def test_slicer_builds_adaptive_intermediate_semantic_snapshots():
+    slicer = Slicer()
+
+    one_mid = slicer._build_semantic_timestep_map(t_start=10, t_peak=20, t_end=90)
+    assert one_mid == {"T_start": 10, "T_peak": 20, "T_mid_1": 55, "T_end": 90}
+
+    two_mid = slicer._build_semantic_timestep_map(t_start=10, t_peak=20, t_end=140)
+    assert two_mid == {
+        "T_start": 10,
+        "T_peak": 20,
+        "T_mid_1": 60,
+        "T_mid_2": 100,
+        "T_end": 140,
+    }
+
+
+def test_slicer_filters_following_behavior_from_pet_candidates():
+    ego = FakeAgent("ego", FakeAgentType("VEHICLE"))
+    lead = FakeAgent("agent_lead", FakeAgentType("VEHICLE"))
+    agents = [ego, lead]
+    scene = FakeScene(agents, _presence(agents, 5))
+    states = {
+        ("ego", 0): FakeState((0.0, 0.0), (3.0, 0.0)),
+        ("agent_lead", 0): FakeState((20.0, 0.5), (6.0, 0.0)),
+        ("ego", 1): FakeState((3.0, 0.0), (3.0, 0.0)),
+        ("agent_lead", 1): FakeState((26.0, 0.5), (6.0, 0.0)),
+        ("ego", 2): FakeState((6.0, 0.0), (3.0, 0.0)),
+        ("agent_lead", 2): FakeState((32.0, 0.5), (6.0, 0.0)),
+        ("ego", 3): FakeState((9.0, 0.0), (3.0, 0.0)),
+        ("agent_lead", 3): FakeState((38.0, 0.5), (6.0, 0.0)),
+        ("ego", 4): FakeState((12.0, 0.0), (3.0, 0.0)),
+        ("agent_lead", 4): FakeState((44.0, 0.5), (6.0, 0.0)),
+    }
+
+    episodes = Slicer(
+        pre_buffer_sec=1.0,
+        post_buffer_sec=1.0,
+        ego_motion_threshold=0.5,
+        pet_event_threshold=2.0,
+        min_peak_gap_sec=3.0,
+        max_episodes_per_scene=1,
+        enable_pet_peak=True,
+        enable_tti_peak=False,
+        enable_ttc_peak=False,
+        enable_dynamics_peak=False,
+    ).extract_episodes(scene, FakeCache(states))
+
+    assert episodes == []
+
+
+def test_slicer_extracts_tti_peak_candidate_from_future_trajectories():
+    ego = FakeAgent("ego", FakeAgentType("VEHICLE"))
+    cross = FakeAgent("agent_cross", FakeAgentType("VEHICLE"))
+    agents = [ego, cross]
+    scene = FakeScene(agents, _presence(agents, 6))
+    states = {
+        ("ego", 0): FakeState((0.0, 0.0), (2.0, 0.0)),
+        ("agent_cross", 0): FakeState((6.0, -4.0), (0.0, 2.0), heading=np.pi / 2.0),
+        ("ego", 1): FakeState((2.0, 0.0), (2.0, 0.0)),
+        ("agent_cross", 1): FakeState((6.0, -2.0), (0.0, 2.0), heading=np.pi / 2.0),
+        ("ego", 2): FakeState((4.0, 0.0), (2.0, 0.0)),
+        ("agent_cross", 2): FakeState((6.0, 0.0), (0.0, 2.0), heading=np.pi / 2.0),
+        ("ego", 3): FakeState((6.0, 0.0), (2.0, 0.0)),
+        ("agent_cross", 3): FakeState((6.0, 2.0), (0.0, 2.0), heading=np.pi / 2.0),
+        ("ego", 4): FakeState((8.0, 0.0), (2.0, 0.0)),
+        ("agent_cross", 4): FakeState((6.0, 4.0), (0.0, 2.0), heading=np.pi / 2.0),
+        ("ego", 5): FakeState((10.0, 0.0), (2.0, 0.0)),
+        ("agent_cross", 5): FakeState((6.0, 6.0), (0.0, 2.0), heading=np.pi / 2.0),
+    }
+
+    episodes = Slicer(
+        pre_buffer_sec=1.0,
+        post_buffer_sec=1.0,
+        ego_motion_threshold=0.5,
+        tti_event_threshold=2.0,
+        min_peak_gap_sec=3.0,
+        max_episodes_per_scene=1,
+        enable_pet_peak=False,
+        enable_tti_peak=True,
+        enable_ttc_peak=False,
+        enable_dynamics_peak=False,
+    ).extract_episodes(scene, FakeCache(states))
+
+    assert len(episodes) == 1
+    assert episodes[0].metadata["peak_metric_type"] == "tti"
+    assert episodes[0].metadata["trigger_agent_ids"] == ["agent_cross"]
+    assert 0.0 < episodes[0].metadata["min_tti"] < 2.0
+    assert episodes[0].metadata["tti_prefilter_enabled"] is True
+    assert episodes[0].metadata["tti_ttc_prefilter_threshold"] > episodes[0].metadata["ttc_event_threshold"]
+    assert episodes[0].metadata["peak_evidence"]["trajectory_intersection_angle_deg"] >= 25.0
     assert episodes[0].metadata["conflict_zone"]["center"] is not None
+
+
+def test_slicer_filters_following_behavior_from_tti_candidates():
+    ego = FakeAgent("ego", FakeAgentType("VEHICLE"))
+    leader = FakeAgent("agent_lead", FakeAgentType("VEHICLE"))
+    agents = [ego, leader]
+    scene = FakeScene(agents, _presence(agents, 6))
+    states = {
+        ("ego", 0): FakeState((0.0, 0.0), (2.0, 0.0)),
+        ("agent_lead", 0): FakeState((8.0, 0.0), (2.0, 0.0)),
+        ("ego", 1): FakeState((2.0, 0.0), (2.0, 0.0)),
+        ("agent_lead", 1): FakeState((10.0, 0.0), (2.0, 0.0)),
+        ("ego", 2): FakeState((4.0, 0.0), (2.0, 0.0)),
+        ("agent_lead", 2): FakeState((12.0, 0.0), (2.0, 0.0)),
+        ("ego", 3): FakeState((6.0, 0.0), (2.0, 0.0)),
+        ("agent_lead", 3): FakeState((14.0, 0.0), (2.0, 0.0)),
+        ("ego", 4): FakeState((8.0, 0.0), (2.0, 0.0)),
+        ("agent_lead", 4): FakeState((16.0, 0.0), (2.0, 0.0)),
+        ("ego", 5): FakeState((10.0, 0.0), (2.0, 0.0)),
+        ("agent_lead", 5): FakeState((18.0, 0.0), (2.0, 0.0)),
+    }
+
+    episodes = Slicer(
+        pre_buffer_sec=1.0,
+        post_buffer_sec=1.0,
+        ego_motion_threshold=0.5,
+        tti_event_threshold=2.0,
+        min_peak_gap_sec=3.0,
+        max_episodes_per_scene=1,
+        enable_pet_peak=False,
+        enable_tti_peak=True,
+        enable_ttc_peak=False,
+        enable_dynamics_peak=False,
+    ).extract_episodes(scene, FakeCache(states))
+
+    assert episodes == []
 
 
 def test_slicer_extracts_dynamics_peak_candidate():

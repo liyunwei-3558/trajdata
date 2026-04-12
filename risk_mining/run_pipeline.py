@@ -49,6 +49,7 @@ def setup_pipeline(config: Dict[str, Any]) -> Tuple[Any, RuleRegistry, Slicer, S
             TTCCriticalRule(
                 ttc_threshold=ttc_cfg.get("ttc_threshold", 2.5),
                 map_cache_path=dataset.cache_path,
+                causal_max_distance_m_for_pet_ttc=config["slicer"].get("causal_max_distance_m_for_pet_ttc", 25.0),
                 causal_filter_enabled=causal_filter_cfg.get("enabled", True),
                 lane_constrained_types=causal_filter_cfg.get("lane_constrained_types"),
                 current_lane_max_dist=causal_filter_cfg.get("current_lane_max_dist", 2.5),
@@ -77,6 +78,7 @@ def setup_pipeline(config: Dict[str, Any]) -> Tuple[Any, RuleRegistry, Slicer, S
         ego_motion_threshold=config["slicer"].get("ego_motion_threshold", 0.5),
         ttc_event_threshold=config["slicer"].get("ttc_event_threshold", 2.5),
         pet_event_threshold=config["slicer"].get("pet_event_threshold", 2.0),
+        tti_event_threshold=config["slicer"].get("tti_event_threshold", 2.0),
         ttc_clear_threshold=config["slicer"].get("ttc_clear_threshold", 5.0),
         min_peak_gap_sec=config["slicer"].get("min_peak_gap_sec"),
         max_episodes_per_scene=config["slicer"].get("max_episodes_per_scene", 5),
@@ -91,8 +93,22 @@ def setup_pipeline(config: Dict[str, Any]) -> Tuple[Any, RuleRegistry, Slicer, S
         visibility_fov_deg=config["slicer"].get("visibility_fov_deg", 140.0),
         occlusion_lateral_threshold=config["slicer"].get("occlusion_lateral_threshold", 2.5),
         pet_prediction_horizon_sec=config["slicer"].get("pet_prediction_horizon_sec", 5.0),
+        tti_prediction_horizon_sec=config["slicer"].get("tti_prediction_horizon_sec", 4.0),
+        tti_conflict_radius=config["slicer"].get("tti_conflict_radius", 3.0),
+        tti_initial_roi_distance=config["slicer"].get("tti_initial_roi_distance", 40.0),
+        tti_min_intersection_angle_deg=config["slicer"].get("tti_min_intersection_angle_deg", 25.0),
+        tti_prefilter_enabled=config["slicer"].get("tti_prefilter_enabled", True),
+        tti_prefilter_ratio=config["slicer"].get("tti_prefilter_ratio", 0.75),
+        following_filter_enabled=config["slicer"].get("following_filter_enabled", True),
+        following_heading_threshold_deg=config["slicer"].get("following_heading_threshold_deg", 20.0),
+        following_lateral_threshold_m=config["slicer"].get("following_lateral_threshold_m", 4.0),
+        causal_max_distance_m_for_pet_ttc=config["slicer"].get("causal_max_distance_m_for_pet_ttc", 25.0),
         stop_speed_threshold=config["slicer"].get("stop_speed_threshold", 0.1),
         zero_acc_threshold=config["slicer"].get("zero_acc_threshold", 0.3),
+        enable_pet_peak=config["slicer"].get("enable_pet_peak", True),
+        enable_tti_peak=config["slicer"].get("enable_tti_peak", True),
+        enable_ttc_peak=config["slicer"].get("enable_ttc_peak", True),
+        enable_dynamics_peak=config["slicer"].get("enable_dynamics_peak", True),
     )
 
     output_dir = Path(config["output"]["output_dir"]).expanduser()
