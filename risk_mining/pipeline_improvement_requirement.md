@@ -2,7 +2,7 @@
  * @Author: Yunwei Li 1084087910@qq.com
  * @Date: 2026-04-06 17:11:59
  * @LastEditors: Yunwei Li 1084087910@qq.com
- * @LastEditTime: 2026-04-07 01:36:35
+ * @LastEditTime: 2026-04-13 21:37:56
  * @FilePath: /My_trajdata/risk_mining/pipeline_improvement_requirement.md
  * @Description: 
  * 
@@ -13,15 +13,41 @@
 
 ## 需要修改/改进的内容或case
 
-1. 这个超远距离跟车冲突，需要检查pet计算
+1. 这个是超远距离跟车冲突，实际上风险不大了
 > Event: event_b6bab75b
 Scene: tj_7_28_1 R21 (sind)
 Ego: 181
 Primary Risk Agents: 187
 Peak Metric: pet (0.5513129868854376)
 
+2. TTI计算问题
+有很多场景直接TTI = 0？ 不太合理。而且，就算TTI非常小，T_peak也应该选择两车距离较近的时刻
+
+3. 路口中的跟车行为没有过滤掉，这种行为实际上没有风险，而且就算他车追尾也不是ego的责任
+> Event: event_625a440f
+Scene: tj_7_28_1 R21 (sind)
+Ego: 31
+
+4. 在html交互式可视化中，右侧文字显示peak metric 为 tti(0) 然而左侧红色casual edge显示的是PET的数值，请检查是否有问题
 
 
+---
+
+1. 在Event: event_1fa6fc3f
+Scene: tj_7_28_1 R21 (sind)
+Ego: 164
+Primary Risk Agents: 171
+Peak Metric: tti (0.4)
+Start Rule: boundary_crossing_heuristic
+
+位于路口中，路口中可以不考虑这个boundary crossing，不知道是不是可以判断“是否位于路口中”。总之，结果上看，start的时刻距离peak太近了，不合理
+
+2. 当PET或TTC触发 的距离特别远的因果边可以不建立，过滤掉，如：Event: event_04d934e7
+Scene: tj_7_28_1 R21 (sind)
+Ego: 40
+Primary Risk Agents: 42
+
+3. 有的场景事件中，T_peak and T_end 相距时间太久（50帧以上），需要在中间再建立1到2个快照
 
 
 ## 已修改的（可以在此定期记录修改的内容）

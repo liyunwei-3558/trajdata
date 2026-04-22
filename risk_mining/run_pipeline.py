@@ -120,6 +120,8 @@ def setup_pipeline(config: Dict[str, Any]) -> Tuple[Any, RuleRegistry, Slicer, S
 def process_scene(scene: Any, cache: Any, slicer: Slicer, registry: RuleRegistry, checker: SanityChecker, dual_lib: DualLibrary, logger=None) -> Dict[str, int]:
     stats = {"episodes_extracted": 0, "episodes_passed": 0, "episodes_failed": 0}
 
+    if logger:
+        logger.info("Scene %s: starting extraction", scene.name)
     episodes = slicer.extract_episodes(scene, cache)
     stats["episodes_extracted"] = len(episodes)
     if logger:

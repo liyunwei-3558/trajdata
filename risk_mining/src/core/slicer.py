@@ -212,9 +212,14 @@ class Slicer:
         self.enable_tti_peak = bool(enable_tti_peak)
         self.enable_ttc_peak = bool(enable_ttc_peak)
         self.enable_dynamics_peak = bool(enable_dynamics_peak)
+        self._tti_cache: Dict[Tuple[str, str, int], Optional[Tuple[float, Tuple[float, float], float, float, float]]] = {}
+        self._state_cache: Dict[Tuple[str, int], Optional[Any]] = {}
+        self._future_trajectory_cache: Dict[Tuple[str, int, int], Tuple[np.ndarray, ...]] = {}
 
     def extract_episodes(self, scene: "Scene", cache: "DataFrameCache") -> List[Episode]:
         self._tti_cache: Dict[Tuple[str, str, int], Optional[Tuple[float, Tuple[float, float], float, float, float]]] = {}
+        self._state_cache: Dict[Tuple[str, int], Optional[Any]] = {}
+        self._future_trajectory_cache: Dict[Tuple[str, int, int], Tuple[np.ndarray, ...]] = {}
         if not getattr(scene, "agent_presence", None):
             return []
 
@@ -836,14 +841,18 @@ class Slicer:
             return []
         return agent_presence[timestep]
 
-    @staticmethod
-    def _safe_get_state(cache: "DataFrameCache", agent_id: str, scene_ts: int) -> Optional[Any]:
+    def _safe_get_state(self, cache: "DataFrameCache", agent_id: str, scene_ts: int) -> Optional[Any]:
         if scene_ts < 0:
             return None
+        cache_key = (agent_id, scene_ts)
+        if cache_key in self._state_cache:
+            return self._state_cache[cache_key]
         try:
-            return cache.get_state(agent_id, scene_ts)
+            state = cache.get_state(agent_id, scene_ts)
         except Exception:
-            return None
+            state = None
+        self._state_cache[cache_key] = state
+        return state
 
     def _get_ego_candidates(self, scene: "Scene") -> List[Any]:
         agents = getattr(scene, "agents", None) or []
@@ -1252,12 +1261,17 @@ class Slicer:
         scene_ts: int,
         horizon_ts: int,
     ) -> List[np.ndarray]:
+        cache_key = (agent_id, scene_ts, horizon_ts)
+        if cache_key in self._future_trajectory_cache:
+            return [point.copy() for point in self._future_trajectory_cache[cache_key]]
+
         positions: List[np.ndarray] = []
         for timestep in range(scene_ts, scene_ts + horizon_ts + 1):
             state = self._safe_get_state(cache, agent_id, timestep)
             if state is None:
                 break
             positions.append(self._state_position(state))
+        self._future_trajectory_cache[cache_key] = tuple(point.copy() for point in positions)
         return positions
 
     def _trajectory_headings(self, positions: Sequence[np.ndarray]) -> List[float]:

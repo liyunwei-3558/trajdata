@@ -44,6 +44,8 @@ def main() -> None:
     parser.add_argument("--locations", nargs="+", default=["tj", "cq"])
     parser.add_argument("--output-root", type=str, default="./risk_mining/output/batch_runs")
     parser.add_argument("--scene-limit", type=int, default=None)
+    parser.add_argument("--rebuild-cache", action="store_true")
+    parser.add_argument("--rebuild-maps", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -55,7 +57,12 @@ def main() -> None:
 
     for desired_tag in desired_tags:
         config = copy.deepcopy(base_config)
-        config.setdefault("data", {})["desired_data"] = [desired_tag]
+        data_cfg = config.setdefault("data", {})
+        data_cfg["desired_data"] = [desired_tag]
+        if args.rebuild_cache:
+            data_cfg["rebuild_cache"] = True
+        if args.rebuild_maps:
+            data_cfg["rebuild_maps"] = True
         tag_output_dir = output_root / f"{run_stamp}_{desired_tag.replace('sind-', '')}"
         config.setdefault("output", {})["output_dir"] = str(tag_output_dir)
 
