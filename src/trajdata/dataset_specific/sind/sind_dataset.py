@@ -1,5 +1,6 @@
 """SinD (Signalized Intersections) dataset implementation for trajdata."""
 
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
@@ -22,6 +23,9 @@ from trajdata.dataset_specific.sind.sind_utils import (
 from trajdata.dataset_specific.sind.sind_lanelet2_utils import (
     lanelet2_map_to_vector_map,
     get_lanelet2_map_path,
+)
+from trajdata.dataset_specific.sind.sind_traffic_lights import (
+    build_traffic_light_dataframe,
 )
 from trajdata.utils import arr_utils
 
@@ -388,6 +392,25 @@ class SindDataset(RawDataset):
                 df["ay"] = df["ay"].fillna(pd.Series(accel[:, 1], index=df.index))
 
             cache_class.save_agent_data(df, cache_path, scene)
+
+        # Optional enhancement: cache SinD traffic-light phase data when the
+        # external CSV root is configured. Failures here must not affect the
+        # existing trajectory cache path.
+        try:
+            tls_df, _ = build_traffic_light_dataframe(
+                scene_name=scene.name,
+                location=scenario["location"],
+                scene_id=scenario["scene_id"],
+                scene_length=scene.length_timesteps,
+                scene_dt=self.metadata.dt,
+            )
+            if tls_df is not None:
+                cache_class.save_traffic_light_data(tls_df, cache_path, scene)
+        except Exception as exc:
+            warnings.warn(
+                f"Skipping optional SinD traffic-light cache for {scene.name}: {exc}",
+                RuntimeWarning,
+            )
 
         return agent_list, agent_presence
 

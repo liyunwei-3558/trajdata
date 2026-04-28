@@ -6,3 +6,4 @@ class TrafficLightStatus(IntEnum):
     UNKNOWN = 0
     GREEN = 1
     RED = 2
+    YELLOW = 3

@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "description": "Optional SinD traffic-light-to-lane mapping. Empty mappings preserve raw signal IDs as synthetic trajdata lane_id keys until each intersection is manually aligned from the PNG diagrams and maps.",
+  "locations": {
+    "cc": {
+      "raw_folder": "Changchun_Pudong",
+      "light_to_lanes": {},
+      "scenes": {}
+    },
+    "xa": {
+      "raw_folder": "Xi'an_shanglin",
+      "light_to_lanes": {},
+      "scenes": {}
+    },
+    "xasl": {
+      "raw_folder": "Xi'an_shanglin",
+      "light_to_lanes": {},
+      "scenes": {}
+    },
+    "tj": {
+      "raw_folder": "tianjin",
+      "light_to_lanes": {},
+      "scenes": {}
+    },
+    "cqNR": {
+      "raw_folder": "Chongqing_NR",
+      "light_to_lanes": {},
+      "scenes": {}
+    },
+    "cqIR": {
+      "raw_folder": "Chongqing_IR",
+      "light_to_lanes": {},
+      "scenes": {}
+    },
+    "cqR": {
+      "raw_folder": "Chongqing_R",
+      "light_to_lanes": {},
+      "scenes": {}
+    }
+  }
+}

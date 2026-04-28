@@ -532,6 +532,8 @@ class VectorMap:
                     lane_color = [0, 200, 0]
                 elif status == TrafficLightStatus.RED:
                     lane_color = [200, 0, 0]
+                elif status == TrafficLightStatus.YELLOW:
+                    lane_color = [230, 180, 0]
                 elif status == TrafficLightStatus.UNKNOWN:
                     lane_color = [150, 150, 0]
 
