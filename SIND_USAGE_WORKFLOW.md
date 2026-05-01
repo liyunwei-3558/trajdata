@@ -533,6 +533,23 @@ ln -s /path/to/output_json/xa_map.json /path/to/SinD_dataset/xa/xa_map.json
 
 ## 快速参考
 
+### 场景过滤小工具
+
+同学整理的静止车辆、跟车状态、位置合法性三个过滤器已整合到：
+
+```python
+from trajdata.dataset_specific.sind.scene_filters import (
+    build_area_boundary,
+    build_lane_area,
+    is_following_vehicle,
+    is_position_invalid,
+    is_vehicle_static,
+    load_curbstone_points,
+)
+```
+
+关键点数据位于 `src/trajdata/dataset_specific/sind/data/curbstone.json`，用于按城市构建入口/出口车道。详细说明见 `Task_docs/SinDSceneFilters.md`，示例见 `examples/sind_scene_filter_example.py`。
+
 ### 常用参数
 
 | 参数 | 说明 | 推荐值 |

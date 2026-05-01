@@ -9,6 +9,15 @@ from trajdata.dataset_specific.sind.sind_traffic_lights import (
     build_traffic_light_dataframe,
     configured_traffic_light_root,
 )
+from trajdata.dataset_specific.sind.scene_filters import (
+    available_curbstone_locations,
+    build_area_boundary,
+    build_lane_area,
+    is_following_vehicle,
+    is_position_invalid,
+    is_vehicle_static,
+    load_curbstone_points,
+)
 
 __all__ = [
     "SindDataset",
@@ -16,4 +25,11 @@ __all__ = [
     "get_lanelet2_map_path",
     "build_traffic_light_dataframe",
     "configured_traffic_light_root",
+    "available_curbstone_locations",
+    "build_area_boundary",
+    "build_lane_area",
+    "is_following_vehicle",
+    "is_position_invalid",
+    "is_vehicle_static",
+    "load_curbstone_points",
 ]

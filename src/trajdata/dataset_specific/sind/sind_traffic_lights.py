@@ -227,12 +227,13 @@ def _lane_ids_for_light(
     location_mapping = mapping.get("locations", {}).get(location, {})
     scene_mapping = location_mapping.get("scenes", {}).get(scene_id, {})
 
-    lane_ids: Sequence[str] = (
-        scene_mapping.get("light_to_lanes", {}).get(light_key)
-        or location_mapping.get("light_to_lanes", {}).get(light_key)
-        or []
-    )
-    if lane_ids:
+    scene_light_to_lanes = scene_mapping.get("light_to_lanes", {})
+    location_light_to_lanes = location_mapping.get("light_to_lanes", {})
+    if light_key in scene_light_to_lanes:
+        lane_ids: Sequence[str] = scene_light_to_lanes[light_key]
+        return [str(lane_id) for lane_id in lane_ids]
+    if light_key in location_light_to_lanes:
+        lane_ids = location_light_to_lanes[light_key]
         return [str(lane_id) for lane_id in lane_ids]
 
     return [_synthetic_lane_id(location, kind, light_idx)]

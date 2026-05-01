@@ -300,7 +300,51 @@ conda run -n trajdata python risk_mining/conflict_patterns_spatial_clustering.py
 | cqR | 931 |
 | xasl | 1,311 |
 
-## 8. 快速打开所有 HTML 汇报
+
+## 8. Violations & Non-compliant Baseline：违规与非标行为基线
+
+### 指标含义
+
+描述 SinD 路口中的规则背景噪声，包含机动车结构化违规 proxy 与 VRU 侵入/非标行为。当前不会在证据不足时过度宣称严格违法：红灯-车道-停止线绑定尚未完成，因此严格红灯越线统计标记为 unavailable；天津 pkl 中已有的官方红灯/黄灯标签会单独输出。
+
+机动车侧输出：官方红灯标签、反向/对向车道 proxy、路口核心 ROI 内车道切换 proxy。VRU 侧输出：行人/自行车/摩托车占用机动车道的时间和路径比例，以及有 crosswalk polygon 时的路口核心区非斑马线驻留时间。
+
+### 运行脚本
+
+```bash
+conda run -n trajdata python risk_mining/structured_violations_noncompliance.py \
+  --data-dir /home/lyw/1TBSSD/Datasets/SinD_dataset_Simple \
+  --cities cc tj cqIR cqNR cqR xasl \
+  --output-dir risk_mining/output_structured_violations_noncompliance
+```
+
+### 可视化入口
+
+- HTML：`risk_mining/output_structured_violations_noncompliance/index.html`
+- 汇总柱状图：`risk_mining/output_structured_violations_noncompliance/summary_violation_rates.png`
+- 机动车事件热点：`risk_mining/output_structured_violations_noncompliance/vehicle_violation_hotspot_<location>.png`
+- VRU 侵入热点：`risk_mining/output_structured_violations_noncompliance/vru_encroachment_<location>.png`
+
+### 结果保存位置
+
+- 目录：`risk_mining/output_structured_violations_noncompliance`
+- 核心文件：`summary_by_location.csv`、`summary_by_city.csv`、`vehicle_violation_events.csv`、`vehicle_violation_track_metrics.csv`、`vru_noncompliance_events.csv`、`vru_noncompliance_track_metrics.csv`、`lane_direction_diagnostics.csv`、`filtered_static_tracks.csv`、`violation_rois.geojson`、`methodology_notes.json`
+- 详细说明：`Task_docs/ViolationsNonCompliance.md`
+
+### 当前结果概览
+
+| location | vehicle tracks | wrong-way checked | wrong-way raw | lane-switch proxy | official red label | VRU tracks | VRU encroachment | map-dir warning lanes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| cc | 7,206 | 4.82% | 82.20% | 21.20% | 0.00% | 719 | 91.10% | 7 |
+| tj | 5,271 | 13.05% | 23.15% | 1.71% | 2.68% | 7,508 | 94.98% | 2 |
+| cqIR | 3,548 | 4.90% | 29.48% | 6.06% | 0.00% | 2,038 | 92.49% | 10 |
+| cqNR | 2,004 | 11.93% | 71.21% | 6.74% | 0.00% | 1,571 | 84.34% | 9 |
+| cqR | 9,584 | 6.83% | 45.33% | 3.57% | 0.00% | 3,144 | 97.07% | 10 |
+| xasl | 5,170 | 6.23% | 82.55% | 24.51% | 0.00% | 1,279 | 95.07% | 16 |
+
+`wrong-way raw` 受 Lanelet2 车道方向错误影响较大；`wrong-way checked` 已排除被诊断为方向异常的车道，适合作为地图返工前的临时 proxy。
+
+## 9. 快速打开所有 HTML 汇报
 
 ```bash
 xdg-open risk_mining/output_kinematic_envelopes_six_all/index.html
@@ -310,6 +354,7 @@ xdg-open risk_mining/output_intersection_spatiotemporal_density/index.html
 xdg-open risk_mining/output_critical_gap_acceptance/index.html
 xdg-open risk_mining/output_interaction_topology_complexity/index.html
 xdg-open risk_mining/output_conflict_patterns_spatial_clustering/index.html
+xdg-open risk_mining/output_structured_violations_noncompliance/index.html
 ```
 
 如果在无 GUI 环境运行，可直接在文件浏览器或 VS Code 中打开上述 `index.html`。

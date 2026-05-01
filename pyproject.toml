@@ -37,6 +37,9 @@ dependencies = [
     "shapely>=2.0.0",
 ]
 
+[tool.setuptools.package-data]
+"trajdata.dataset_specific.sind" = ["data/*.json", "*.json"]
+
 [project.optional-dependencies]
 av2 = ["av2==0.2.1"]
 dev = ["black", "isort", "pytest", "pytest-xdist", "twine", "build"]
