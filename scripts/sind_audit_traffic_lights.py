@@ -24,7 +24,7 @@ def _iter_target_locations(raw_locations: Iterable[str]) -> List[str]:
 
 def audit_with_sind_pkls(
     sind_data_dir: Path,
-    traffic_light_root: Path,
+    traffic_light_root: Path | None,
     locations: Iterable[str],
 ) -> List[Dict]:
     sind_obj = SindObject(sind_data_dir, load_locations=list(locations))
@@ -52,6 +52,7 @@ def audit_with_sind_pkls(
                 scene_length=scene_length,
                 scene_dt=scene_dt,
                 root=traffic_light_root,
+                pkl_root=sind_data_dir,
             )
             reports.append(report.to_dict())
         sind_obj.unload_city(location)
@@ -130,10 +131,10 @@ def main() -> None:
     args = parser.parse_args()
 
     traffic_light_root = configured_traffic_light_root(args.traffic_light_dir)
-    if traffic_light_root is None:
+    if traffic_light_root is None and not args.sind_data_dir:
         raise SystemExit(
-            "No traffic-light root found. Pass --traffic-light-dir or set "
-            "SIND_TRAFFIC_LIGHT_DIR."
+            "No traffic-light source found. Pass --sind-data-dir for local pkl "
+            "or pass --traffic-light-dir / set SIND_TRAFFIC_LIGHT_DIR for raw CSV."
         )
 
     locations = _iter_target_locations(args.locations)
@@ -143,7 +144,7 @@ def main() -> None:
         reports = audit_raw_only(traffic_light_root, locations)
 
     result = {
-        "traffic_light_root": str(traffic_light_root),
+        "traffic_light_root": str(traffic_light_root) if traffic_light_root is not None else None,
         "summary": summarize(reports),
         "reports": reports,
     }

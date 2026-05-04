@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import pickle
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,7 @@ TRAFFIC_LIGHT_FILE_PATTERNS: Tuple[str, ...] = (
 
 DEFAULT_MAPPING_PATH = Path(__file__).with_name("sind_traffic_light_mapping.json")
 DEFAULT_RAW_VIDEO_FPS = 30.0
+TRAFFIC_LIGHT_PKL_VERSION = 1
 
 
 @dataclass
@@ -61,6 +63,7 @@ class TrafficLightBuildReport:
     alignment: str = ""
     status_counts: Dict[str, int] = field(default_factory=dict)
     unknown_codes: Dict[str, int] = field(default_factory=dict)
+    source: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         """Return a JSON-serializable report."""
@@ -77,6 +80,7 @@ class TrafficLightBuildReport:
             "alignment": self.alignment,
             "status_counts": self.status_counts,
             "unknown_codes": self.unknown_codes,
+            "source": self.source,
         }
 
 
@@ -189,6 +193,46 @@ def find_traffic_light_csv(
     return None, scene_folder
 
 
+def traffic_light_pkl_path(dataset_root: os.PathLike[str] | str, location: str) -> Path:
+    """Return the canonical local SinD traffic-light pkl path for a location."""
+    return Path(dataset_root).expanduser() / location / f"traffic_lights_{location}.pkl"
+
+
+def find_traffic_light_pkl(
+    dataset_root: Optional[os.PathLike[str] | str],
+    location: str,
+) -> Optional[Path]:
+    """Find the local traffic-light pkl for a location."""
+    if dataset_root is None:
+        return None
+    path = traffic_light_pkl_path(dataset_root, location)
+    return path if path.exists() else None
+
+
+def load_traffic_light_pkl(
+    dataset_root: os.PathLike[str] | str,
+    location: str,
+) -> Dict[str, Any]:
+    """Load a location-level SinD traffic-light pkl."""
+    path = traffic_light_pkl_path(dataset_root, location)
+    with path.open("rb") as f:
+        payload = pickle.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid traffic-light pkl payload: {path}")
+    return payload
+
+
+def _dedupe_tls_dataframe(tls_df: pd.DataFrame) -> pd.DataFrame:
+    """Drop duplicate lane/time entries with deterministic last-wins semantics."""
+    if tls_df.empty:
+        return tls_df
+    if not isinstance(tls_df.index, pd.MultiIndex) or list(tls_df.index.names) != ["lane_id", "scene_ts"]:
+        return tls_df
+    if tls_df.index.has_duplicates:
+        tls_df = tls_df[~tls_df.index.duplicated(keep="last")]
+    return tls_df.sort_index()
+
+
 def _load_mapping(mapping_path: Optional[Path] = None) -> Dict[str, Any]:
     path = mapping_path or DEFAULT_MAPPING_PATH
     if not path.exists():
@@ -288,7 +332,7 @@ def _compute_change_scene_ts(
     return scene_ts, f"RawFrameID_relative_{DEFAULT_RAW_VIDEO_FPS:g}fps"
 
 
-def build_traffic_light_dataframe(
+def _build_traffic_light_dataframe_from_csv(
     scene_name: str,
     location: str,
     scene_id: str,
@@ -296,14 +340,16 @@ def build_traffic_light_dataframe(
     scene_dt: float,
     root: Optional[Path] = None,
     mapping_path: Optional[Path] = None,
-) -> Tuple[Optional[pd.DataFrame], TrafficLightBuildReport]:
-    """Build a trajdata traffic-light status table for one SinD scene."""
+    include_raw_changes: bool = False,
+) -> Tuple[Optional[pd.DataFrame], TrafficLightBuildReport, Optional[pd.DataFrame]]:
+    """Build a trajdata traffic-light status table from the original SinD CSV."""
     report = TrafficLightBuildReport(
         scene_name=scene_name,
         location=location,
         scene_id=scene_id,
         status="skipped",
         num_scene_timesteps=scene_length,
+        source="csv",
     )
 
     root = configured_traffic_light_root(root)
@@ -312,28 +358,28 @@ def build_traffic_light_dataframe(
             "No SinD traffic-light CSV root configured. Set "
             "SIND_TRAFFIC_LIGHT_DIR to enable optional signal caching."
         )
-        return None, report
+        return None, report, None
 
     if location in SKIPPED_LOCATIONS:
         report.message = f"Location {location} is intentionally skipped."
-        return None, report
+        return None, report, None
 
     csv_path, scene_folder = find_traffic_light_csv(root, location, scene_id)
     if csv_path is None:
         folder_msg = f" under {scene_folder}" if scene_folder else ""
         report.message = f"No TrafficLight CSV found{folder_msg}."
-        return None, report
+        return None, report, None
 
     report.csv_path = str(csv_path)
     df = pd.read_csv(csv_path)
     if df.empty or "RawFrameID" not in df.columns:
         report.message = "TrafficLight CSV is empty or missing RawFrameID."
-        return None, report
+        return None, report, df if include_raw_changes else None
 
     light_columns = _traffic_light_columns(df.columns)
     if not light_columns:
         report.message = "TrafficLight CSV contains no traffic-light columns."
-        return None, report
+        return None, report, df if include_raw_changes else None
 
     mapping = _load_mapping(mapping_path)
     change_scene_ts, alignment = _compute_change_scene_ts(df, scene_dt)
@@ -380,11 +426,11 @@ def build_traffic_light_dataframe(
 
     if not records:
         report.message = "No traffic-light records were generated."
-        return None, report
+        return None, report, df if include_raw_changes else None
 
     tls_df = pd.DataFrame.from_records(records)
     tls_df.set_index(["lane_id", "scene_ts"], inplace=True)
-    tls_df.sort_index(inplace=True)
+    tls_df = _dedupe_tls_dataframe(tls_df)
 
     report.status = "ok"
     report.message = "Traffic-light table built successfully."
@@ -393,4 +439,109 @@ def build_traffic_light_dataframe(
     report.alignment = alignment
     report.status_counts = status_counts
     report.unknown_codes = unknown_codes
+    return tls_df, report, df if include_raw_changes else None
+
+
+def build_traffic_light_dataframe_from_pkl(
+    scene_name: str,
+    location: str,
+    scene_id: str,
+    scene_length: int,
+    dataset_root: os.PathLike[str] | str,
+) -> Tuple[Optional[pd.DataFrame], TrafficLightBuildReport]:
+    """Build a trajdata traffic-light status table from a local SinD pkl."""
+    report = TrafficLightBuildReport(
+        scene_name=scene_name,
+        location=location,
+        scene_id=scene_id,
+        status="skipped",
+        num_scene_timesteps=scene_length,
+        source="pkl",
+    )
+    pkl_path = find_traffic_light_pkl(dataset_root, location)
+    if pkl_path is None:
+        report.message = f"No local traffic-light pkl found for {location}."
+        return None, report
+
+    try:
+        payload = load_traffic_light_pkl(dataset_root, location)
+    except Exception as exc:
+        report.message = f"Could not load traffic-light pkl: {exc}"
+        return None, report
+
+    scene_payload = payload.get("scenes", {}).get(scene_id)
+    if not scene_payload:
+        report.message = f"Scene {scene_id} not found in {pkl_path}."
+        return None, report
+
+    stored_report = scene_payload.get("report", {})
+    tls_df = scene_payload.get("traffic_light_status")
+    if not isinstance(tls_df, pd.DataFrame):
+        report.message = stored_report.get("message", "Scene has no traffic-light status table.")
+        report.status = stored_report.get("status", "skipped")
+        report.csv_path = stored_report.get("csv_path")
+        report.alignment = stored_report.get("alignment", "")
+        report.num_lights = int(stored_report.get("num_lights", 0) or 0)
+        report.unknown_codes = dict(stored_report.get("unknown_codes", {}) or {})
+        report.status_counts = dict(stored_report.get("status_counts", {}) or {})
+        return None, report
+
+    if not isinstance(tls_df.index, pd.MultiIndex) or list(tls_df.index.names) != ["lane_id", "scene_ts"]:
+        tls_df = tls_df.copy()
+        if {"lane_id", "scene_ts", "status"}.issubset(tls_df.columns):
+            tls_df.set_index(["lane_id", "scene_ts"], inplace=True)
+        else:
+            report.message = f"Invalid traffic-light status table in {pkl_path} for scene {scene_id}."
+            return None, report
+
+    tls_df = _dedupe_tls_dataframe(tls_df)
+    report.status = "ok"
+    report.message = "Traffic-light table loaded from local pkl."
+    report.csv_path = stored_report.get("csv_path") or scene_payload.get("csv_path")
+    report.num_lights = int(stored_report.get("num_lights", 0) or 0)
+    report.num_rows = int(len(tls_df))
+    report.num_scene_timesteps = int(stored_report.get("num_scene_timesteps", scene_length) or scene_length)
+    report.alignment = stored_report.get("alignment", "")
+    report.status_counts = dict(stored_report.get("status_counts", {}) or {})
+    report.unknown_codes = dict(stored_report.get("unknown_codes", {}) or {})
+    report.source = "pkl"
     return tls_df, report
+
+
+def build_traffic_light_dataframe(
+    scene_name: str,
+    location: str,
+    scene_id: str,
+    scene_length: int,
+    scene_dt: float,
+    root: Optional[Path] = None,
+    mapping_path: Optional[Path] = None,
+    pkl_root: Optional[Path] = None,
+    prefer_pkl: bool = True,
+) -> Tuple[Optional[pd.DataFrame], TrafficLightBuildReport]:
+    """Build a trajdata traffic-light status table for one SinD scene."""
+    pkl_report: Optional[TrafficLightBuildReport] = None
+    if prefer_pkl and pkl_root is not None:
+        tls_df, pkl_report = build_traffic_light_dataframe_from_pkl(
+            scene_name=scene_name,
+            location=location,
+            scene_id=scene_id,
+            scene_length=scene_length,
+            dataset_root=pkl_root,
+        )
+        if tls_df is not None:
+            return tls_df, pkl_report
+
+    tls_df, csv_report, _ = _build_traffic_light_dataframe_from_csv(
+        scene_name=scene_name,
+        location=location,
+        scene_id=scene_id,
+        scene_length=scene_length,
+        scene_dt=scene_dt,
+        root=root,
+        mapping_path=mapping_path,
+    )
+    if tls_df is None and pkl_report is not None and configured_traffic_light_root(root) is None:
+        pkl_report.message = f"{pkl_report.message} CSV fallback is not configured."
+        return None, pkl_report
+    return tls_df, csv_report

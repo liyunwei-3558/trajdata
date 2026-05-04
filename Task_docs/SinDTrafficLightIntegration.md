@@ -1,11 +1,13 @@
 # SinD Traffic Light Integration
 
-本文档说明本项目对 SinD 交通信号灯数据的可选补充接入。该功能不会改变已有 pkl 轨迹、地图缓存和指标分析脚本；只有在显式设置外部 CSV 根目录时才会写入 trajdata 的 traffic-light cache。
+本文档说明本项目对 SinD 交通信号灯数据的补充接入。当前支持两种来源：整理后的本地 traffic-light pkl，以及原始 `TrafficLight*.csv`。默认优先读取本地 pkl；若 pkl 缺失，再回退到外部 CSV。
 
 ## 数据来源与范围
 
-- 信号灯 CSV 根目录：`/home/lyw/1TBSSD/Datasets/SinD-dataset-wangpan/可用-csv`
-- 启用方式：
+- 原始信号灯 CSV 根目录：`/home/lyw/1TBSSD/Datasets/SinD-dataset-wangpan/可用-csv`
+- 整理后的本地 pkl 保存位置：`datasets/SinD_dataset/<location>/traffic_lights_<location>.pkl`
+- 默认读取优先级：本地 pkl 优先，外部 CSV 回退。
+- 若只使用本地 pkl，不需要设置环境变量；若需要从 CSV 生成或回退，可设置：
 
 ```bash
 export SIND_TRAFFIC_LIGHT_DIR="/home/lyw/1TBSSD/Datasets/SinD-dataset-wangpan/可用-csv"
@@ -24,8 +26,8 @@ export SIND_TRAFFIC_LIGHT_DIR="/home/lyw/1TBSSD/Datasets/SinD-dataset-wangpan/�
 
 新增模块：`src/trajdata/dataset_specific/sind/sind_traffic_lights.py`
 
-- 读取每个 scene 文件夹中的 `TrafficLight*.csv` 或 `Traffic_Lights.csv`
-- 将 CSV 中的相位变化点扩展为逐 `scene_ts` 的状态表
+- 读取每个 location 的 `traffic_lights_<location>.pkl`，或回退读取每个 scene 文件夹中的 `TrafficLight*.csv` / `Traffic_Lights.csv`
+- 将 CSV 中的相位变化点扩展为逐 `scene_ts` 的状态表，并可离线保存进本地 pkl
 - 输出 trajdata 标准格式：
 
 ```text
@@ -44,14 +46,44 @@ column: status
 - 若 `sind_traffic_light_mapping.json` 中配置了真实 `light_id -> lane_id`，则写入真实 lane id。
 - 若没有配置，则写入 synthetic id，例如 `sind_tl:cqNR:vehicle:1`，确保缓存可读取且不做错误车道绑定。
 
+## 本地 pkl 生成
+
+脚本：`scripts/sind_build_traffic_light_pkls.py`
+
+```bash
+conda run -n trajdata python scripts/sind_build_traffic_light_pkls.py \
+  --sind-data-dir /home/lyw/1TBSSD/Datasets/ClaudeWork/My_trajdata/datasets/SinD_dataset \
+  --traffic-light-dir /home/lyw/1TBSSD/Datasets/SinD-dataset-wangpan/可用-csv \
+  --locations cc tj xasl cqNR cqIR cqR \
+  --output-summary risk_mining/output_sind_traffic_lights/pkl_build_summary.json
+```
+
+每个 pkl 保存：
+
+- `raw_changes`：原始 CSV 切换表，并附加 `_scene_ts` 对齐列。
+- `traffic_light_status`：trajdata 标准 MultiIndex DataFrame，index 为 `(lane_id, scene_ts)`，列为 `status`。
+- `report`：构建诊断信息，包括状态计数、对齐方式、原始 CSV 路径。
+
+当前已生成：
+
+| location | scenes | ok | skipped |
+|---|---:|---:|---:|
+| cc | 8 | 8 | 0 |
+| tj | 23 | 23 | 0 |
+| xasl | 15 | 15 | 0 |
+| cqNR | 10 | 9 | 1 |
+| cqIR | 9 | 7 | 2 |
+| cqR | 10 | 8 | 2 |
+
 ## 缓存入口
 
 文件：`src/trajdata/dataset_specific/sind/sind_dataset.py`
 
-在 `SindDataset.get_agent_info()` 完成 agent cache 后，会尝试执行可选信号灯缓存：
+在 `SindDataset.get_agent_info()` 完成 agent cache 后，会尝试执行信号灯缓存：
 
-- 未设置 `SIND_TRAFFIC_LIGHT_DIR`：完全跳过，行为与旧版本一致。
-- 找不到某个 scene 的 CSV：跳过该 scene 的信号灯，不影响轨迹缓存。
+- 找到 `datasets/SinD_dataset/<location>/traffic_lights_<location>.pkl`：优先从 pkl 读取。
+- pkl 缺失且设置了 `SIND_TRAFFIC_LIGHT_DIR` 或传入 CSV root：回退到原始 CSV。
+- 找不到某个 scene 的信号灯：跳过该 scene 的信号灯，不影响轨迹缓存。
 - 解析成功：调用 `cache_class.save_traffic_light_data()`，生成 trajdata 标准 traffic-light feather 文件。
 
 典型缓存位置：
@@ -71,14 +103,16 @@ python scripts/sind_audit_traffic_lights.py \
   --traffic-light-dir "$SIND_TRAFFIC_LIGHT_DIR"
 ```
 
-结合 pkl 数据检查 scene 对齐、状态分布和逐帧表生成：
+结合本地 pkl 数据检查 scene 对齐、状态分布和逐帧表生成；不传 `--traffic-light-dir` 时即验证 pkl-only 路径：
 
 ```bash
 python scripts/sind_audit_traffic_lights.py \
-  --traffic-light-dir "$SIND_TRAFFIC_LIGHT_DIR" \
-  --sind-data-dir /home/lyw/1TBSSD/Datasets/SinD_dataset_Simple \
-  --output-json risk_mining/output_sind_traffic_lights/audit.json
+  --sind-data-dir /home/lyw/1TBSSD/Datasets/ClaudeWork/My_trajdata/datasets/SinD_dataset \
+  --locations cc tj xasl cqNR cqIR cqR \
+  --output-json risk_mining/output_sind_traffic_lights/audit_pkl.json
 ```
+
+如需验证 CSV 回退，也可同时传入 `--traffic-light-dir`。
 
 输出 JSON 中包含：
 
@@ -95,8 +129,7 @@ python scripts/sind_audit_traffic_lights.py \
 
 ```bash
 python scripts/sind_visualize_traffic_lights.py \
-  --traffic-light-dir "$SIND_TRAFFIC_LIGHT_DIR" \
-  --sind-data-dir /home/lyw/1TBSSD/Datasets/SinD_dataset_Simple \
+  --sind-data-dir /home/lyw/1TBSSD/Datasets/ClaudeWork/My_trajdata/datasets/SinD_dataset \
   --locations cc tj xasl cqNR cqIR cqR \
   --output-dir risk_mining/output_sind_traffic_lights
 ```
@@ -105,8 +138,7 @@ python scripts/sind_visualize_traffic_lights.py \
 
 ```bash
 python scripts/sind_visualize_traffic_lights.py \
-  --traffic-light-dir "$SIND_TRAFFIC_LIGHT_DIR" \
-  --sind-data-dir /home/lyw/1TBSSD/Datasets/SinD_dataset_Simple \
+  --sind-data-dir /home/lyw/1TBSSD/Datasets/ClaudeWork/My_trajdata/datasets/SinD_dataset \
   --locations tj xasl cqNR \
   --scenes-per-location 1 \
   --output-dir /tmp/sind_tls_visual_check
@@ -126,7 +158,7 @@ python scripts/sind_visualize_traffic_lights.py \
 - 绿灯开始后，`Core entries / bin` 通常应上升，`Approach stopped vehicles` 应下降。
 - 红灯开始后，入口等待车辆通常应上升，进入路口车辆数应下降。
 - 如果相位切换与车辆响应整体错开很多秒，优先检查 `timestamp(ms)` / `RawFrameID` 对齐。
-- 当前没有真实 `light_id -> lane_id` 映射时，响应分数是全局 sanity check，不代表某个灯号已经绑定到具体车道。
+- 当前 `sind_traffic_light_mapping.json` 已写入人工标注的灯号-车道/人行横道绑定。若某个 CSV 灯号仍未标注，会保留 synthetic id 作为提示。
 
 ## 灯号-车道绑定标注工具
 
@@ -173,8 +205,8 @@ cd ../SinD_TrafficLight_Annotator
 python merge_annotation.py \
   /path/to/sind_tl_lane_mapping_cqNR.json \
   --traffic-light-dir /home/lyw/1TBSSD/Datasets/SinD-dataset-wangpan/可用-csv \
-  --sind-data-dir /home/lyw/1TBSSD/Datasets/SinD_dataset_Simple \
-  --lanelet-dir /home/lyw/1TBSSD/Datasets/ClaudeWork/My_trajdata/Lanelet_maps_SinD \
+  --sind-data-dir /home/lyw/1TBSSD/Datasets/ClaudeWork/My_trajdata/datasets/SinD_dataset \
+  --lanelet-dir /home/lyw/1TBSSD/Datasets/ClaudeWork/SinD_TrafficLight_Annotator/lanelet_maps \
   --mapping-path mapping_template.json \
   --output merged_mapping.json
 ```
@@ -194,8 +226,10 @@ src/trajdata/dataset_specific/sind/sind_traffic_light_mapping.json
 
 注意：绑定关系使用 Lanelet2 lane id。如果需要在 trajdata map 中显示真实车道红绿灯，缓存地图时建议使用 `map_params={"use_lanelet2_maps": True}`。
 
-## 后续补强
+## 当前状态与后续补强
 
-- 根据标注工具导出的结果，在 `sind_traffic_light_mapping.json` 中逐步补充真实 `light_to_lanes`。
-- 补充后，trajdata 的 map API 可以通过真实 `(lane_id, scene_ts)` 查询对应红绿灯状态。
-- 若需要论文级验证，可另做一个交通流反推脚本，对比车辆停止/启动行为与 CSV 相位的一致性。
+- 人工标注结果已经整合进 `src/trajdata/dataset_specific/sind/sind_traffic_light_mapping.json`。
+- `cqNR/cqIR/cqR` 已包含 pedestrian crosswalk 绑定；其它路口当前导出结果未包含行人灯 crosswalk 绑定。
+- `cqIR` 存在两个 lane 被多个灯号绑定的 warning；代码采用 deterministic last-wins 去重，避免 `(lane_id, scene_ts)` 重复破坏缓存和可视化。
+- 后续若继续修订标注，需重新合并 mapping，并重新运行 `scripts/sind_build_traffic_light_pkls.py` 生成本地 pkl。
+- 若需要论文级验证，可另做交通流反推脚本，对比车辆停止/启动行为与 CSV 相位的一致性。

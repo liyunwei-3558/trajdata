@@ -403,6 +403,7 @@ class SindDataset(RawDataset):
                 scene_id=scenario["scene_id"],
                 scene_length=scene.length_timesteps,
                 scene_dt=self.metadata.dt,
+                pkl_root=Path(self.metadata.data_dir),
             )
             if tls_df is not None:
                 cache_class.save_traffic_light_data(tls_df, cache_path, scene)

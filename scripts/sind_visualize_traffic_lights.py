@@ -87,15 +87,17 @@ def discover_light_keys(traffic_light_root: Path, location: str) -> List[str]:
 
 
 def mapping_coverage_rows(
-    traffic_light_root: Path,
+    traffic_light_root: Optional[Path],
     locations: Sequence[str],
     mapping_path: Path = DEFAULT_MAPPING_PATH,
 ) -> List[Dict[str, Any]]:
     mapping = load_mapping(mapping_path)
     rows: List[Dict[str, Any]] = []
     for location in locations:
-        light_keys = discover_light_keys(traffic_light_root, location)
+        light_keys = discover_light_keys(traffic_light_root, location) if traffic_light_root is not None else []
         loc_mapping = mapping.get("locations", {}).get(location, {}).get("light_to_lanes", {})
+        if not light_keys:
+            light_keys = sorted(loc_mapping.keys(), key=lambda key: (key.split(":")[0], int(key.split(":")[1])))
         mapped_lights = [key for key in light_keys if loc_mapping.get(key)]
         mapped_lanes = sorted({lane_id for key in mapped_lights for lane_id in loc_mapping.get(key, [])})
         rows.append(
@@ -225,7 +227,8 @@ def compute_flow_metrics(
 
 
 def tls_phase_matrix(tls_df: pd.DataFrame) -> Tuple[List[str], np.ndarray]:
-    table = tls_df.reset_index().pivot(index="lane_id", columns="scene_ts", values="status")
+    frame = tls_df.reset_index().drop_duplicates(["lane_id", "scene_ts"], keep="last")
+    table = frame.pivot(index="lane_id", columns="scene_ts", values="status")
     table = table.sort_index(axis=0).sort_index(axis=1)
     arr = table.fillna(int(TrafficLightStatus.UNKNOWN)).to_numpy(dtype=int)
     known = {
@@ -550,7 +553,7 @@ def write_csv(output_dir: Path, summaries: Sequence[Mapping[str, Any]]) -> None:
 
 def visualize_scene(
     sind_obj: SindObject,
-    traffic_light_root: Path,
+    traffic_light_root: Optional[Path],
     location: str,
     scene_id: str,
     output_dir: Path,
@@ -567,6 +570,7 @@ def visualize_scene(
         scene_length=scene_length,
         scene_dt=sind_obj.get_dt(),
         root=traffic_light_root,
+        pkl_root=sind_obj.dataset_path,
     )
 
     safe_scene = sanitize_filename(scene_name)
@@ -657,17 +661,15 @@ def main() -> None:
     args = parser.parse_args()
 
     traffic_light_root = configured_traffic_light_root(args.traffic_light_dir)
-    if traffic_light_root is None:
-        raise SystemExit(
-            "No traffic-light root found. Pass --traffic-light-dir or set "
-            "SIND_TRAFFIC_LIGHT_DIR."
-        )
+    sind_data_dir = Path(args.sind_data_dir)
+    if traffic_light_root is None and not sind_data_dir.exists():
+        raise SystemExit("No traffic-light source found. Pass a valid --sind-data-dir or --traffic-light-dir.")
 
     locations = iter_locations(args.locations)
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    sind_obj = SindObject(Path(args.sind_data_dir), load_locations=locations)
+    sind_obj = SindObject(sind_data_dir, load_locations=locations)
     summaries: List[Dict[str, Any]] = []
     for location in locations:
         if location not in sind_obj.locations:
