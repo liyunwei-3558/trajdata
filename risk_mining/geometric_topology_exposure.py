@@ -53,6 +53,9 @@ def _base_geometry_df() -> pd.DataFrame:
 
 def _residence_metrics(track_residence: pd.DataFrame) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
+    if "is_roi_static_filtered" in track_residence.columns:
+        keep_mask = ~track_residence["is_roi_static_filtered"].astype(str).str.lower().isin({"true", "1", "yes"})
+        track_residence = track_residence[keep_mask].copy()
     for location, group in track_residence.groupby("location"):
         seconds = pd.to_numeric(group["seconds_in_roi"], errors="coerce").dropna()
         rows.append(
@@ -167,6 +170,7 @@ def _corr_pair(x: pd.Series, y: pd.Series) -> Tuple[float, float, int]:
 def compute_correlations(metrics: pd.DataFrame) -> pd.DataFrame:
     x_cols = [
         ("conflict_area_m2", "Conflict area"),
+        ("roi_area_m2", "Core ROI area"),
         ("angle_skew_deg", "Angle skew"),
     ]
     y_cols = [
@@ -240,6 +244,23 @@ def _annotated_scatter(
         ax.plot(fit[0], fit[1], color=color, linewidth=1.4, alpha=0.65, linestyle="--")
 
 
+def _area_metric_scatter(
+    ax: plt.Axes,
+    df: pd.DataFrame,
+    x_col: str,
+    x_label: str,
+    y_col: str,
+    color: str,
+    title: str,
+    corr_df: pd.DataFrame,
+) -> None:
+    _annotated_scatter(ax, df, x_col, y_col, color, label=title)
+    ax.set_xlabel(x_label)
+    ax.set_title(title)
+    ax.text(0.02, 0.96, _corr_text(corr_df, x_col, y_col), transform=ax.transAxes, va="top", fontsize=8)
+    ax.grid(True, linestyle="--", alpha=0.25)
+
+
 def _corr_text(corr_df: pd.DataFrame, x_metric: str, y_metric: str) -> str:
     row = corr_df[(corr_df["x_metric"] == x_metric) & (corr_df["y_metric"] == y_metric)]
     if row.empty:
@@ -254,16 +275,9 @@ def _corr_text(corr_df: pd.DataFrame, x_metric: str, y_metric: str) -> str:
 
 def plot_area_vs_residence(metrics: pd.DataFrame, corr_df: pd.DataFrame, output_path: Path) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.8), dpi=180)
-    _annotated_scatter(axes[0], metrics, "conflict_area_m2", "mean_roi_residence_s", "#2f6f8f", label="Mean")
-    axes[0].set_title("Mean Core Residence")
+    _area_metric_scatter(axes[0], metrics, "conflict_area_m2", "Un-channelized conflict area Ac (m2)", "mean_roi_residence_s", "#2f6f8f", "Mean Core Residence", corr_df)
     axes[0].set_ylabel("Seconds")
-    axes[0].text(0.02, 0.96, _corr_text(corr_df, "conflict_area_m2", "mean_roi_residence_s"), transform=axes[0].transAxes, va="top", fontsize=8)
-    _annotated_scatter(axes[1], metrics, "conflict_area_m2", "p90_roi_residence_s", "#b65d2e", marker="s", label="P90")
-    axes[1].set_title("P90 Core Residence")
-    axes[1].text(0.02, 0.96, _corr_text(corr_df, "conflict_area_m2", "p90_roi_residence_s"), transform=axes[1].transAxes, va="top", fontsize=8)
-    for ax in axes:
-        ax.set_xlabel("Un-channelized conflict area Ac (m2)")
-        ax.grid(True, linestyle="--", alpha=0.25)
+    _area_metric_scatter(axes[1], metrics, "conflict_area_m2", "Un-channelized conflict area Ac (m2)", "p90_roi_residence_s", "#b65d2e", "P90 Core Residence", corr_df)
     fig.suptitle("Conflict Area vs Vehicle Exposure Time", y=1.02)
     fig.tight_layout()
     fig.savefig(output_path)
@@ -280,6 +294,17 @@ def plot_area_vs_long_residence(metrics: pd.DataFrame, corr_df: pd.DataFrame, ou
     ax.text(0.02, 0.96, _corr_text(corr_df, "conflict_area_m2", "long_residence_ge_5s_ratio"), transform=ax.transAxes, va="top", fontsize=8)
     ax.grid(True, linestyle="--", alpha=0.25)
     ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
+def plot_roi_area_vs_metrics(metrics: pd.DataFrame, corr_df: pd.DataFrame, output_path: Path) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.8), dpi=180)
+    _area_metric_scatter(axes[0], metrics, "roi_area_m2", "Core ROI area (m2)", "mean_roi_residence_s", "#3f7d99", "Mean Core Residence", corr_df)
+    axes[0].set_ylabel("Seconds")
+    _area_metric_scatter(axes[1], metrics, "roi_area_m2", "Core ROI area (m2)", "p90_roi_residence_s", "#9d5b2b", "P90 Core Residence", corr_df)
+    fig.suptitle("Core ROI Area vs Vehicle Exposure Time", y=1.02)
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
@@ -407,22 +432,27 @@ def plot_angle_skew(metrics: pd.DataFrame, corr_df: pd.DataFrame, output_path: P
 
 
 def plot_correlation_heatmap(corr_df: pd.DataFrame, output_path: Path) -> None:
-    area_corr = corr_df[corr_df["x_metric"] == "conflict_area_m2"].copy()
+    area_corr = corr_df[corr_df["x_metric"].isin(["conflict_area_m2", "roi_area_m2"])].copy()
     area_corr = area_corr.dropna(subset=["spearman_r"])
     if area_corr.empty:
         return
-    values = area_corr["spearman_r"].to_numpy(dtype=float)[None, :]
-    labels = area_corr["y_label"].tolist()
-    fig_w = max(9.0, 0.46 * len(labels))
-    fig, ax = plt.subplots(figsize=(fig_w, 3.0), dpi=180)
+    pivot = area_corr.pivot(index="x_label", columns="y_label", values="spearman_r")
+    values = pivot.to_numpy(dtype=float)
+    labels = list(pivot.columns)
+    fig_w = max(11.0, 0.42 * len(labels))
+    fig_h = max(3.0, 0.45 * len(pivot.index))
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=180)
     im = ax.imshow(values, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
-    ax.set_yticks([0])
-    ax.set_yticklabels(["Ac Spearman r"])
+    ax.set_yticks(np.arange(len(pivot.index)))
+    ax.set_yticklabels(list(pivot.index))
     ax.set_xticks(np.arange(len(labels)))
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    for idx, value in enumerate(values[0]):
-        ax.text(idx, 0, f"{value:.2f}", ha="center", va="center", fontsize=8, color="#111111")
-    ax.set_title("Conflict Area vs Exposure Metrics Correlation (N=6)")
+    for i in range(values.shape[0]):
+        for j in range(values.shape[1]):
+            value = values[i, j]
+            if pd.notna(value):
+                ax.text(j, i, f"{value:.2f}", ha="center", va="center", fontsize=8, color="#111111")
+    ax.set_title("Geometry Area vs Exposure Metrics Spearman Correlation (N=6)")
     fig.colorbar(im, ax=ax, fraction=0.035, pad=0.02)
     fig.tight_layout()
     fig.savefig(output_path)
@@ -454,6 +484,7 @@ def write_html(output_path: Path, metrics: pd.DataFrame, correlations: pd.DataFr
         metrics,
         [
             ("location", "Location"),
+            ("roi_area_m2", "ROI area m2"),
             ("conflict_area_m2", "Ac m2"),
             ("intersection_angle_deg", "Angle deg"),
             ("mean_roi_residence_s", "Mean residence"),
@@ -464,6 +495,19 @@ def write_html(output_path: Path, metrics: pd.DataFrame, correlations: pd.DataFr
             ("duration_p90_s", "P90 game s"),
             ("unique_spatial_overlap_cells_1m", "Legal overlap cells"),
         ],
+    )
+    area_corr = correlations[correlations["x_metric"].isin(["conflict_area_m2", "roi_area_m2"])].copy()
+    area_corr = area_corr.sort_values(["x_metric", "spearman_r"], ascending=[True, False])
+    area_corr_table = _html_table(
+        area_corr,
+        [
+            ("x_label", "Area metric"),
+            ("y_label", "Compared metric"),
+            ("pearson_r", "Pearson r"),
+            ("spearman_r", "Spearman r"),
+            ("n", "N"),
+        ],
+        max_rows=50,
     )
     top_corr = correlations[correlations["x_metric"] == "conflict_area_m2"].copy()
     top_corr["abs_spearman"] = top_corr["spearman_r"].abs()
@@ -485,6 +529,7 @@ def write_html(output_path: Path, metrics: pd.DataFrame, correlations: pd.DataFr
         ("area_vs_interaction_complexity.png", "Ac vs multi-agent complexity"),
         ("area_vs_interaction_duration.png", "Ac vs interaction duration"),
         ("area_vs_right_of_way_overlap.png", "Ac vs legal path overlap"),
+        ("roi_area_vs_metrics.png", "ROI area correlation view"),
         ("angle_skew_vs_exposure.png", "Angle skew auxiliary plots"),
         ("geometric_correlation_heatmap.png", "Correlation heatmap"),
     ]
@@ -521,6 +566,7 @@ def write_html(output_path: Path, metrics: pd.DataFrame, correlations: pd.DataFr
       <p class="note">本报告只有 6 个路口样本，相关系数用于讨论趋势，不用于强显著性宣称。cc/tj/xasl 的 VRU 绿灯过街绑定当前不可观测，路权重叠图中以空心点提示。</p>
     </section>
     <section class="panel"><h2>Merged Metrics</h2>{metric_table}</section>
+    <section class="panel"><h2>ROI Area Correlations</h2>{area_corr_table}</section>
     <section class="panel"><h2>Ac Correlations</h2>{corr_table}</section>
     {figure_html}
   </main>
@@ -552,6 +598,7 @@ def main() -> None:
     plot_area_vs_complexity(metrics, correlations, args.output_dir / "area_vs_interaction_complexity.png")
     plot_area_vs_duration(metrics, correlations, args.output_dir / "area_vs_interaction_duration.png")
     plot_area_vs_right_of_way(metrics, correlations, args.output_dir / "area_vs_right_of_way_overlap.png")
+    plot_roi_area_vs_metrics(metrics, correlations, args.output_dir / "roi_area_vs_metrics.png")
     plot_angle_skew(metrics, correlations, args.output_dir / "angle_skew_vs_exposure.png")
     plot_correlation_heatmap(correlations, args.output_dir / "geometric_correlation_heatmap.png")
     notes = {

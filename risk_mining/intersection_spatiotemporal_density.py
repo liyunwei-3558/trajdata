@@ -202,6 +202,37 @@ def _track_motion_stats(track: TrackRecord, dt: float) -> Dict[str, float]:
     }
 
 
+def _motion_stats_from_xy(xy: np.ndarray, state: Optional[pd.DataFrame], dt: float) -> Dict[str, float]:
+    if len(xy) < 2:
+        duration = float(len(xy) * dt)
+        return {
+            "duration_s": duration,
+            "net_displacement_m": 0.0,
+            "path_length_m": 0.0,
+            "p95_speed_mps": 0.0,
+            "mean_path_speed_mps": 0.0,
+        }
+
+    step_dist = np.linalg.norm(np.diff(xy, axis=0), axis=1)
+    path_length = float(np.sum(step_dist))
+    net_displacement = float(np.linalg.norm(xy[-1] - xy[0]))
+    duration = float(len(xy) * dt)
+
+    if state is not None and {"vx", "vy"}.issubset(state.columns):
+        speed = np.hypot(state["vx"].to_numpy(dtype=float), state["vy"].to_numpy(dtype=float))
+        speed = speed[np.isfinite(speed)]
+    else:
+        speed = step_dist / max(dt, 1e-6)
+    p95_speed = float(np.quantile(speed, 0.95)) if len(speed) else 0.0
+    return {
+        "duration_s": duration,
+        "net_displacement_m": net_displacement,
+        "path_length_m": path_length,
+        "p95_speed_mps": p95_speed,
+        "mean_path_speed_mps": float(path_length / duration) if duration > 0 else 0.0,
+    }
+
+
 def _is_static_track(
     track: TrackRecord,
     dt: float,
@@ -225,6 +256,29 @@ def _is_static_track(
         and stats["mean_path_speed_mps"] <= static_max_mean_path_speed_mps
     )
     return bool(nearly_fixed or almost_never_moves or slow_creeping_queue), stats
+
+
+def _is_static_like_motion(
+    stats: Mapping[str, float],
+    static_min_duration_s: float,
+    static_max_displacement_m: float,
+    static_max_path_length_m: float,
+    static_max_speed_p95_mps: float,
+    static_min_slow_duration_s: float,
+    static_max_mean_path_speed_mps: float,
+) -> bool:
+    if stats["duration_s"] < static_min_duration_s:
+        return False
+    nearly_fixed = (
+        stats["net_displacement_m"] <= static_max_displacement_m
+        and stats["path_length_m"] <= static_max_path_length_m
+    )
+    almost_never_moves = stats["p95_speed_mps"] <= static_max_speed_p95_mps
+    slow_creeping_queue = (
+        stats["duration_s"] >= static_min_slow_duration_s
+        and stats["mean_path_speed_mps"] <= static_max_mean_path_speed_mps
+    )
+    return bool(nearly_fixed or almost_never_moves or slow_creeping_queue)
 
 
 def filter_static_tracks(
@@ -294,7 +348,14 @@ def compute_city_occupancy(
     turn_heading_threshold_deg: float,
     lane_trim_ratio: float,
     central_quantile: float,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Polygon, Dict[str, Any], pd.DataFrame]:
+    roi_static_filter_enabled: bool,
+    roi_static_min_duration_s: float,
+    roi_static_max_displacement_m: float,
+    roi_static_max_path_length_m: float,
+    roi_static_max_speed_p95_mps: float,
+    roi_static_min_slow_duration_s: float,
+    roi_static_max_mean_path_speed_mps: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Polygon, Dict[str, Any], pd.DataFrame, pd.DataFrame]:
     roi_polygon, roi_debug = infer_intersection_core_roi(
         lane_refs,
         core_buffer_m=core_buffer_m,
@@ -312,15 +373,33 @@ def compute_city_occupancy(
     total_points = 0
     in_roi_points = 0
     track_rows = []
+    filtered_rows = []
+    filtered_keys = set()
     path = _polygon_to_mpl_path(roi_polygon)
     for track in tracks:
-        xy = _track_xy(track)
+        state = track.state.sort_values("frame_id").copy()
+        if not {"x", "y"}.issubset(state.columns):
+            continue
+        valid_mask = np.isfinite(state[["x", "y"]].to_numpy(dtype=float)).all(axis=1)
+        state = state.loc[valid_mask].copy()
+        xy = state[["x", "y"]].to_numpy(dtype=float)
         if len(xy) == 0:
             continue
         total_points += len(xy)
         mask = path.contains_points(xy)
         xy_in = xy[mask]
+        state_in = state.iloc[np.flatnonzero(mask)].copy()
         in_roi_points += len(xy_in)
+        roi_stats = _motion_stats_from_xy(xy_in, state_in, dt)
+        is_roi_static = _is_static_like_motion(
+            roi_stats,
+            static_min_duration_s=roi_static_min_duration_s,
+            static_max_displacement_m=roi_static_max_displacement_m,
+            static_max_path_length_m=roi_static_max_path_length_m,
+            static_max_speed_p95_mps=roi_static_max_speed_p95_mps,
+            static_min_slow_duration_s=roi_static_min_slow_duration_s,
+            static_max_mean_path_speed_mps=roi_static_max_mean_path_speed_mps,
+        )
         track_rows.append(
             {
                 "location": location,
@@ -331,8 +410,26 @@ def compute_city_occupancy(
                 "points_total": int(len(xy)),
                 "points_in_roi": int(len(xy_in)),
                 "seconds_in_roi": float(len(xy_in) * dt),
+                **roi_stats,
             }
         )
+        if roi_static_filter_enabled and is_roi_static:
+            filtered_keys.add((track.scene_id, track.agent_id))
+            filtered_rows.append(
+                {
+                    "location": location,
+                    "city": LOCATION_DISPLAY.get(location, location),
+                    "scene_id": track.scene_id,
+                    "agent_id": track.agent_id,
+                    "class_name": track.class_name,
+                    "points_total": int(len(xy)),
+                    "points_in_roi": int(len(xy_in)),
+                    "seconds_in_roi": float(len(xy_in) * dt),
+                    **roi_stats,
+                    "filter_reason": "roi_static_like",
+                }
+            )
+            continue
         if len(xy_in) == 0:
             continue
         ix = np.floor((xy_in[:, 0] - x_edges[0]) / grid_size_m).astype(int)
@@ -341,6 +438,8 @@ def compute_city_occupancy(
         np.add.at(grid, (iy[valid], ix[valid]), dt)
 
     occupied_cells = int(np.count_nonzero(grid))
+    for row in track_rows:
+        row["is_roi_static_filtered"] = (row["scene_id"], row["agent_id"]) in filtered_keys
     summary = {
         "location": location,
         "city": LOCATION_DISPLAY.get(location, location),
@@ -356,7 +455,8 @@ def compute_city_occupancy(
         "grid_size_m": float(grid_size_m),
         **roi_debug,
     }
-    return grid, x_edges, y_edges, roi_polygon, summary, pd.DataFrame(track_rows)
+    summary["roi_static_filtered_tracks"] = int(len(filtered_rows))
+    return grid, x_edges, y_edges, roi_polygon, summary, pd.DataFrame(track_rows), pd.DataFrame(filtered_rows)
 
 
 def extract_hotspots(
@@ -588,6 +688,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--static-max-speed-p95-mps", type=float, default=0.15)
     parser.add_argument("--static-min-slow-duration-s", type=float, default=60.0)
     parser.add_argument("--static-max-mean-path-speed-mps", type=float, default=0.25)
+    parser.add_argument("--keep-roi-static-tracks", action="store_true", help="Disable filtering of static/slow tracks measured only inside the intersection ROI.")
+    parser.add_argument("--roi-static-min-duration-s", type=float, default=20.0)
+    parser.add_argument("--roi-static-max-displacement-m", type=float, default=4.0)
+    parser.add_argument("--roi-static-max-path-length-m", type=float, default=10.0)
+    parser.add_argument("--roi-static-max-speed-p95-mps", type=float, default=0.30)
+    parser.add_argument("--roi-static-min-slow-duration-s", type=float, default=30.0)
+    parser.add_argument("--roi-static-max-mean-path-speed-mps", type=float, default=0.50)
     parser.add_argument("--hotspot-top-k", type=int, default=30)
     parser.add_argument("--max-tracks-per-city", type=int, default=None)
     parser.add_argument("--vmax-quantile", type=float, default=0.995)
@@ -628,9 +735,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     summary_rows = []
     hotspot_rows = []
     track_residence_frames = []
+    roi_static_frames = []
     for city in args.cities:
         print(f"Computing occupancy for {city}: {len(tracks_by_city.get(city, []))} tracks", flush=True)
-        grid, x_edges, y_edges, roi_polygon, summary, track_residence = compute_city_occupancy(
+        grid, x_edges, y_edges, roi_polygon, summary, track_residence, roi_static_tracks = compute_city_occupancy(
             city,
             tracks_by_city.get(city, []),
             refs_by_city.get(city, []),
@@ -642,12 +750,21 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             turn_heading_threshold_deg=args.turn_heading_threshold_deg,
             lane_trim_ratio=args.lane_trim_ratio,
             central_quantile=args.central_quantile,
+            roi_static_filter_enabled=not args.keep_roi_static_tracks,
+            roi_static_min_duration_s=args.roi_static_min_duration_s,
+            roi_static_max_displacement_m=args.roi_static_max_displacement_m,
+            roi_static_max_path_length_m=args.roi_static_max_path_length_m,
+            roi_static_max_speed_p95_mps=args.roi_static_max_speed_p95_mps,
+            roi_static_min_slow_duration_s=args.roi_static_min_slow_duration_s,
+            roi_static_max_mean_path_speed_mps=args.roi_static_max_mean_path_speed_mps,
         )
         summary_rows.append(summary)
         city_hotspots = extract_hotspots(grid, x_edges, y_edges, city, args.hotspot_top_k)
         hotspot_rows.extend(city_hotspots)
         if not track_residence.empty:
             track_residence_frames.append(track_residence)
+        if not roi_static_tracks.empty:
+            roi_static_frames.append(roi_static_tracks)
 
         np.savez_compressed(
             args.output_dir / f"occupancy_grid_{city}.npz",
@@ -673,10 +790,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     density_df = pd.DataFrame(summary_rows)
     hotspots_df = pd.DataFrame(hotspot_rows)
     residence_df = pd.concat(track_residence_frames, ignore_index=True) if track_residence_frames else pd.DataFrame()
+    roi_static_df = pd.concat(roi_static_frames, ignore_index=True) if roi_static_frames else pd.DataFrame()
     density_df.to_csv(args.output_dir / "density_summary.csv", index=False)
     hotspots_df.to_csv(args.output_dir / "hotspot_cells.csv", index=False)
     residence_df.to_csv(args.output_dir / "track_roi_residence.csv", index=False)
     static_tracks_df.to_csv(args.output_dir / "filtered_static_tracks.csv", index=False)
+    roi_static_df.to_csv(args.output_dir / "filtered_roi_static_tracks.csv", index=False)
 
     summary = {
         "data_dir": str(args.data_dir),
@@ -698,6 +817,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "static_max_speed_p95_mps": args.static_max_speed_p95_mps,
             "static_min_slow_duration_s": args.static_min_slow_duration_s,
             "static_max_mean_path_speed_mps": args.static_max_mean_path_speed_mps,
+        },
+        "roi_static_filter_enabled": not args.keep_roi_static_tracks,
+        "filtered_roi_static_tracks_total": int(len(roi_static_df)),
+        "roi_static_filter": {
+            "roi_static_min_duration_s": args.roi_static_min_duration_s,
+            "roi_static_max_displacement_m": args.roi_static_max_displacement_m,
+            "roi_static_max_path_length_m": args.roi_static_max_path_length_m,
+            "roi_static_max_speed_p95_mps": args.roi_static_max_speed_p95_mps,
+            "roi_static_min_slow_duration_s": args.roi_static_min_slow_duration_s,
+            "roi_static_max_mean_path_speed_mps": args.roi_static_max_mean_path_speed_mps,
         },
         "summary_by_city": summary_rows,
     }

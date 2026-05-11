@@ -156,8 +156,36 @@ class SindDataset(RawDataset):
 
                 data_idx += 1
 
-        self.cache_all_scenes_list(env_cache, record_list)
+        self._cache_merged_scenes_list(env_cache, record_list)
         return metadata_list
+
+    def _cache_merged_scenes_list(
+        self, env_cache: EnvCache, new_records: List[SindSceneRecord]
+    ) -> None:
+        """Cache SinD scene records without dropping other locations.
+
+        SinD commonly loads one location at a time to keep memory usage bounded.
+        The default RawDataset helper overwrites the environment-level
+        scenes_list.dill, which makes later cache-only loads for other locations
+        appear empty. Merge by scene name instead.
+        """
+        merged_records: Dict[str, SindSceneRecord] = {}
+        try:
+            existing_records: List[SindSceneRecord] = env_cache.load_env_scenes_list(
+                self.name
+            )
+        except FileNotFoundError:
+            existing_records = []
+
+        for record in existing_records:
+            merged_records[record.name] = record
+        for record in new_records:
+            merged_records[record.name] = record
+
+        env_cache.save_env_scenes_list(
+            self.name,
+            sorted(merged_records.values(), key=lambda record: (record.location, record.name)),
+        )
 
     def _get_matching_scenes_from_cache(
         self,
