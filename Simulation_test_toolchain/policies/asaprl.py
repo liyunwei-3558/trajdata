@@ -17,6 +17,10 @@ from .ttc_utils import compute_min_ttc
 class ASAPRLState(PolicyState):
     velocity: float = 0.0
     acceleration: float = 0.0
+    action_step: int = 0
+    cached_acceleration: float = 0.0
+    cached_yaw_rate: float = 0.0
+    has_cached_control: bool = False
 
 
 class ASAPRLPolicy(BasePolicy):
@@ -30,6 +34,7 @@ class ASAPRLPolicy(BasePolicy):
         ckpt_path: Optional[str] = None,
         use_risk_idm: bool = True,
         neighbor_radius: float = 50.0,
+        inference_interval_steps: int = 5,
         **kwargs,
     ) -> None:
         super().__init__(dt=dt)
@@ -51,6 +56,7 @@ class ASAPRLPolicy(BasePolicy):
         self.ckpt_path = ckpt_path
         self.use_risk_idm = use_risk_idm
         self.neighbor_radius = neighbor_radius
+        self.inference_interval_steps = max(1, int(inference_interval_steps))
         self.model = self._load_actor()
 
     def _load_actor(self):
@@ -132,6 +138,13 @@ class ASAPRLPolicy(BasePolicy):
         info = get_agent_world_pose(obs, ego_idx)
         self.state.velocity = float(np.nan_to_num(self.state.velocity, nan=0.0))
         self.state.acceleration = float(np.nan_to_num(self.state.acceleration, nan=0.0))
+        should_infer = (
+            not self.state.has_cached_control
+            or self.state.action_step % self.inference_interval_steps == 0
+        )
+        if not should_infer:
+            return self._repeat_cached_control(info)
+
         image = self._build_observation_image(obs, ego_idx)
         with self.torch.no_grad():
             tensor = self.torch.tensor(image[None], dtype=self.torch.float32)
@@ -153,6 +166,7 @@ class ASAPRLPolicy(BasePolicy):
         next_heading = heading + np.deg2rad(next_yaw_deg)
 
         acceleration = (next_v - self.state.velocity) / self.dt
+        yaw_rate = (next_heading - heading) / self.dt
         if self.use_risk_idm:
             ttc, point, _ = compute_min_ttc(obs, ego_idx, self.neighbor_radius)
             se = (
@@ -174,17 +188,56 @@ class ASAPRLPolicy(BasePolicy):
                     safe_v / next_v
                 )
             next_v = safe_v
+            next_heading = heading
+            yaw_rate = 0.0
 
         self.state.velocity = float(next_v)
         self.state.acceleration = float(acceleration)
+        self.state.cached_acceleration = float(acceleration)
+        self.state.cached_yaw_rate = float(yaw_rate)
+        self.state.has_cached_control = True
+        self.state.action_step += 1
         next_pos = np.nan_to_num(next_pos, nan=0.0, posinf=0.0, neginf=0.0)
         next_heading = float(np.nan_to_num(next_heading, nan=info["heading"]))
         self.last_command = {
             "policy": self.policy_name,
+            "inference_interval_steps": self.inference_interval_steps,
+            "used_cached_control": False,
             "latent_lat": lat1,
             "latent_yaw_deg": yaw1,
             "latent_target_speed": v1,
             "acceleration": float(acceleration),
+            "velocity": float(next_v),
+        }
+        return PolicyAction(
+            xyh=np.array([next_pos[0], next_pos[1], next_heading]),
+            command=self.last_command.copy(),
+        )
+
+    def _repeat_cached_control(self, info) -> PolicyAction:
+        heading = float(info["heading"])
+        velocity = float(np.nan_to_num(self.state.velocity, nan=0.0))
+        acceleration = float(self.state.cached_acceleration)
+        yaw_rate = float(self.state.cached_yaw_rate)
+        next_v = max(0.0, velocity + acceleration * self.dt)
+        next_heading = heading + yaw_rate * self.dt
+        avg_v = 0.5 * (velocity + next_v)
+        mid_heading = heading + 0.5 * yaw_rate * self.dt
+        next_pos = info["position"] + avg_v * self.dt * np.array(
+            [np.cos(mid_heading), np.sin(mid_heading)]
+        )
+
+        self.state.velocity = float(next_v)
+        self.state.acceleration = float(acceleration)
+        self.state.action_step += 1
+        next_pos = np.nan_to_num(next_pos, nan=0.0, posinf=0.0, neginf=0.0)
+        next_heading = float(np.nan_to_num(next_heading, nan=info["heading"]))
+        self.last_command = {
+            "policy": self.policy_name,
+            "inference_interval_steps": self.inference_interval_steps,
+            "used_cached_control": True,
+            "acceleration": float(acceleration),
+            "yaw_rate": float(yaw_rate),
             "velocity": float(next_v),
         }
         return PolicyAction(

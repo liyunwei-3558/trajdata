@@ -66,12 +66,25 @@ def run_simulation(cfg: ToolchainConfig) -> SimulationResult:
         verbose=True,
         num_workers=0,
     )
+    scenes = list(dataset.scenes())
     print(
-        f"[toolchain] dataset ready: scenes={len(list(dataset.scenes()))}, samples={len(dataset)}",
+        f"[toolchain] dataset ready: scenes={len(scenes)}, samples={len(dataset)}",
         flush=True,
     )
 
-    scene = dataset.get_scene(cfg.scenario.scene_index)
+    if cfg.scenario.scene_name:
+        scene = next(
+            (candidate for candidate in scenes if candidate.name == cfg.scenario.scene_name),
+            None,
+        )
+        if scene is None:
+            available = ", ".join(candidate.name for candidate in scenes[:5])
+            raise ValueError(
+                f"scenario.scene_name={cfg.scenario.scene_name!r} not found. "
+                f"First available scenes: {available}"
+            )
+    else:
+        scene = scenes[cfg.scenario.scene_index]
     ego_agent, _ = select_ego_from_scene(
         scene,
         strategy=cfg.scenario.ego_selection_strategy,

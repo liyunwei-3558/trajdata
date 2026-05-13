@@ -19,6 +19,7 @@ class DatasetConfig:
 @dataclass
 class ScenarioConfig:
     scene_index: int = 0
+    scene_name: Optional[str] = None
     init_timestep: Optional[int] = None
     num_steps: int = 50
     ego_selection_strategy: str = "longest_trajectory"
