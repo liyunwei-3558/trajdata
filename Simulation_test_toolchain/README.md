@@ -25,10 +25,44 @@ Supported policy names:
 - `risk_idm`: built-in risk-aware IDM controller
 - `asaprl`: ASAPRL wrapper requiring a working `torch` environment and `checkpoints.asaprl_ckpt_path`
 - `diffuser`: reserved TRACE/Diffuser integration point requiring `torch`, `tbsim`, and `checkpoints.diffuser_ckpt_path`
+- `qcnet`: QCNet wrapper requiring the external QCNet repo, `torch_geometric`/QCNet dependencies, vector maps, and `checkpoints.qcnet_ckpt_path`
 
 Large checkpoint files should be placed outside git or under `Simulation_test_toolchain/checkpoints/` if ignored locally. The runner always reads checkpoint paths from YAML.
 
 The active Python environment must be internally consistent. In particular, `trajdata` imports `pandas`, `pyarrow`, and `torch`; a NumPy 2.x environment with extensions compiled against NumPy 1.x or a mismatched CUDA PyTorch install will fail before the simulation starts.
+
+QCNet training and validation should remain in the QCNet conda environment and use the scripts in that repository, for example `train_qcnet.py` and `val.py`. Running QCNet as a closed-loop policy is different: the simulation is one Python process, so the active conda environment must be able to import both `trajdata` and the QCNet repo dependencies, or you must run the simulation from a shared environment where both sets are installed. The policy loader reads the repo path from `policies.ego.repo_path`, `checkpoints.qcnet_repo_path`, or `QCNET_REPO_PATH`.
+
+Minimal QCNet policy config:
+
+```yaml
+policies:
+  ego_policy: qcnet
+  non_ego_policy: ground_truth
+  ego:
+    map_radius: 150.0
+    step_index: 0
+
+checkpoints:
+  qcnet_repo_path: /path/to/QCNet-main
+  qcnet_ckpt_path: /path/to/qcnet.ckpt
+```
+
+Run the one-shot QCNet prediction evaluator, which splits each selected
+trajectory into history and future at one timestep, runs QCNet once, and writes
+top-1 plus min-of-6 ADE/FDE/MR metrics. The default prediction horizon is 6 s:
+
+```bash
+conda run -n QCNet python -m Simulation_test_toolchain.run_qcnet_prediction_eval \
+  --location cqNR \
+  --num-samples 10 \
+  --device cuda:0
+```
+
+Outputs are written to
+`Simulation_test_toolchain/test_projects/qcnet_prediction_eval_cqNR/` by
+default: `prediction_metrics.csv`, `prediction_metrics.json`, `summary.csv`, and
+`prediction_visualization.html`.
 
 If only one SinD location appears available, rebuild the global scene list:
 

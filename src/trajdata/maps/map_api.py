@@ -33,6 +33,7 @@ class MapAPI:
     def get_map(
         self, map_id: str, scene_cache: Optional[SceneCache] = None, **kwargs
     ) -> VectorMap:
+        associate_traffic_lights: bool = kwargs.pop("associate_traffic_lights", True)
         if map_id not in self.maps:
             env_name, map_name = map_id.split(":")
             env_maps_path: Path = self.unified_cache_path / env_name / "maps"
@@ -53,7 +54,7 @@ class MapAPI:
         else:
             vec_map = self.maps[map_id]
 
-        if scene_cache is not None:
+        if associate_traffic_lights and scene_cache is not None:
             vec_map.associate_scene_data(
                 scene_cache.get_traffic_light_status_dict(
                     kwargs.get("desired_dt", None)

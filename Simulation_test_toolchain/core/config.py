@@ -50,6 +50,8 @@ class PolicyConfig:
 class CheckpointConfig:
     asaprl_ckpt_path: Optional[str] = None
     diffuser_ckpt_path: Optional[str] = None
+    qcnet_ckpt_path: Optional[str] = None
+    qcnet_repo_path: Optional[str] = None
 
 
 @dataclass
@@ -128,11 +130,11 @@ def validate_config(cfg: ToolchainConfig) -> None:
     if cfg.simulation.mode not in valid_modes:
         raise ValueError(f"simulation.mode must be one of {sorted(valid_modes)}.")
 
-    valid_ego = {"ground_truth", "risk_idm", "asaprl"}
+    valid_ego = {"ground_truth", "risk_idm", "asaprl", "qcnet"}
     if cfg.policies.ego_policy not in valid_ego:
         raise ValueError(f"policies.ego_policy must be one of {sorted(valid_ego)}.")
 
-    valid_non_ego = {"ground_truth", "diffuser"}
+    valid_non_ego = {"ground_truth", "diffuser", "qcnet"}
     if cfg.policies.non_ego_policy not in valid_non_ego:
         raise ValueError(
             f"policies.non_ego_policy must be one of {sorted(valid_non_ego)}."

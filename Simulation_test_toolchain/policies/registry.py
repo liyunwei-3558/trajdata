@@ -28,5 +28,10 @@ def build_policy(
 
         params.setdefault("ckpt_path", getattr(checkpoints, "diffuser_ckpt_path", None))
         return DiffuserPolicy(dt=dt, **params)
-    raise ValueError(f"Unknown policy: {name}")
+    if name == "qcnet":
+        from .qcnet_policy import QcnetPolicy
 
+        params.setdefault("ckpt_path", getattr(checkpoints, "qcnet_ckpt_path", None))
+        params.setdefault("repo_path", getattr(checkpoints, "qcnet_repo_path", None))
+        return QcnetPolicy(dt=dt, **params)
+    raise ValueError(f"Unknown policy: {name}")

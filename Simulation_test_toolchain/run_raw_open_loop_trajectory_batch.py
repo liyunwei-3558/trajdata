@@ -105,6 +105,11 @@ def main() -> None:
         history_steps=int(round(args.history_sec / args.dt)),
         future_steps=int(np.ceil(args.future_sec / args.dt)),
         target_per_location=args.target_per_location,
+        min_ego_mean_speed=args.min_ego_mean_speed,
+        min_ego_moving_rate=args.min_ego_moving_rate,
+        moving_speed_threshold=args.moving_speed_threshold,
+        min_ego_displacement=args.min_ego_displacement,
+        max_ego_heading_change=args.max_ego_heading_change,
     )
 
     print(
@@ -149,6 +154,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--future-sec", type=float, default=4.0)
     parser.add_argument("--dt", type=float, default=0.1)
     parser.add_argument("--neighbor-radius", type=float, default=50.0)
+    parser.add_argument("--min-ego-mean-speed", type=float, default=0.5)
+    parser.add_argument("--min-ego-moving-rate", type=float, default=0.35)
+    parser.add_argument("--moving-speed-threshold", type=float, default=0.5)
+    parser.add_argument("--min-ego-displacement", type=float, default=12.0)
+    parser.add_argument("--max-ego-heading-change", type=float, default=0.8)
+    parser.add_argument("--asaprl-action-lat-scale", type=float, default=1.0)
+    parser.add_argument("--asaprl-action-yaw-scale", type=float, default=2.0)
+    parser.add_argument("--asaprl-action-speed-scale", type=float, default=3.0)
+    parser.add_argument("--asaprl-observation-px-per-m", type=float, default=3.0)
+    parser.add_argument("--asaprl-reference-heading-blend", type=float, default=0.8)
+    parser.add_argument("--asaprl-reference-speed-blend", type=float, default=0.0)
+    parser.add_argument("--asaprl-max-yaw-rate", type=float, default=0.3)
+    parser.add_argument("--asaprl-max-speed", type=float, default=8.0)
+    parser.add_argument(
+        "--asaprl-no-follow-reference-direction",
+        action="store_true",
+        help="Disable ASAPRL reference-direction drift guard.",
+    )
     parser.add_argument(
         "--asaprl-ckpt-path",
         type=str,
@@ -172,8 +195,18 @@ def run_policy_batch(
     rows_by_key = _load_manifest(manifest_path)
 
     for intersection, plans in plans_by_location.items():
-        completed = _completed_count(rows_by_key.values(), intersection)
-        if completed >= args.target_per_location:
+        if args.force:
+            rows_by_key = {
+                key: row
+                for key, row in rows_by_key.items()
+                if (
+                    row.get("intersection")
+                    or _canonical_intersection(str(row.get("location", "")))
+                )
+                != intersection
+            }
+        completed = 0 if args.force else _completed_count(rows_by_key.values(), intersection)
+        if completed >= args.target_per_location and not args.force:
             print(
                 f"[batch] {policy} {intersection} already has {completed} completed runs",
                 flush=True,
@@ -198,7 +231,7 @@ def run_policy_batch(
 
             if key in rows_by_key:
                 existing = rows_by_key[key]
-                if existing.get("status") == "completed":
+                if existing.get("status") == "completed" and not args.force:
                     completed += 1
                     if completed >= args.target_per_location:
                         break
@@ -267,6 +300,11 @@ def build_trajectory_plans(
     history_steps: int,
     future_steps: int,
     target_per_location: int,
+    min_ego_mean_speed: float,
+    min_ego_moving_rate: float,
+    moving_speed_threshold: float,
+    min_ego_displacement: float,
+    max_ego_heading_change: float,
 ) -> Dict[str, List[TrajectoryPlan]]:
     plans_by_intersection: Dict[str, List[TrajectoryPlan]] = {}
     for location in locations:
@@ -302,6 +340,17 @@ def build_trajectory_plans(
                 required_last = init_timestep + num_steps
                 required_scene_end = required_last + future_steps + 2
                 if last_frame < required_last or scene_length < required_scene_end:
+                    continue
+                if _is_waiting_segment(
+                    state,
+                    init_timestep,
+                    required_last,
+                    min_mean_speed=min_ego_mean_speed,
+                    min_moving_rate=min_ego_moving_rate,
+                    moving_speed_threshold=moving_speed_threshold,
+                    min_displacement=min_ego_displacement,
+                    max_heading_change=max_ego_heading_change,
+                ):
                     continue
                 duration = last_frame - first_frame + 1
                 run_id = f"{scene_name}__ego{agent_id}__t{init_timestep:04d}"
@@ -370,6 +419,50 @@ def _with_rank(plan: TrajectoryPlan, rank: int) -> TrajectoryPlan:
     )
 
 
+def _is_waiting_segment(
+    state: pd.DataFrame,
+    init_timestep: int,
+    required_last: int,
+    min_mean_speed: float,
+    min_moving_rate: float,
+    moving_speed_threshold: float,
+    min_displacement: float,
+    max_heading_change: float,
+) -> bool:
+    window = state[
+        (state["frame_id"] >= init_timestep)
+        & (state["frame_id"] <= required_last)
+    ]
+    if window.empty:
+        return True
+    if {"vx", "vy"}.issubset(window.columns):
+        speed = np.hypot(
+            window["vx"].to_numpy(dtype=float),
+            window["vy"].to_numpy(dtype=float),
+        )
+    else:
+        xy = window[["x", "y"]].to_numpy(dtype=float)
+        if len(xy) < 2:
+            return True
+        step_speed = np.linalg.norm(np.diff(xy, axis=0), axis=1) / 0.1
+        speed = np.concatenate([[step_speed[0]], step_speed])
+    speed = np.nan_to_num(speed, nan=0.0, posinf=0.0, neginf=0.0)
+    mean_speed = float(np.mean(speed))
+    moving_rate = float(np.mean(speed > moving_speed_threshold))
+    xy = window[["x", "y"]].to_numpy(dtype=float)
+    displacement = float(np.linalg.norm(xy[-1] - xy[0])) if len(xy) >= 2 else 0.0
+    heading_change = 0.0
+    if "heading" in window.columns:
+        heading = np.unwrap(window["heading"].to_numpy(dtype=float))
+        heading_change = float(np.nanmax(heading) - np.nanmin(heading))
+    return (
+        mean_speed < min_mean_speed
+        or moving_rate < min_moving_rate
+        or displacement < min_displacement
+        or heading_change > max_heading_change
+    )
+
+
 def _make_config(
     policy: str,
     plan: TrajectoryPlan,
@@ -402,7 +495,7 @@ def _make_config(
         policies=PolicyConfig(
             ego_policy=policy,
             non_ego_policy="ground_truth",
-            ego=_policy_params(policy),
+            ego=_policy_params(policy, args),
             non_ego={},
         ),
         checkpoints=CheckpointConfig(asaprl_ckpt_path=args.asaprl_ckpt_path),
@@ -417,19 +510,36 @@ def _make_config(
     )
 
 
-def _policy_params(policy: str) -> Dict[str, Any]:
+def _policy_params(policy: str, args: argparse.Namespace) -> Dict[str, Any]:
     if policy == "risk_idm":
         return {
             "desired_velocity": 8.0,
             "max_acceleration": 3.0,
             "min_acceleration": -5.0,
+            "inference_interval_steps": 5,
         }
     if policy == "asaprl":
         return {
-            "target_speed": 5.0,
+            "target_speed": 7.5,
             "horizon": 3.0,
             "use_risk_idm": True,
             "inference_interval_steps": 5,
+            "require_raster_map": True,
+            "action_lat_scale": getattr(args, "asaprl_action_lat_scale", 1.0),
+            "action_yaw_scale": getattr(args, "asaprl_action_yaw_scale", 2.0),
+            "action_speed_scale": getattr(args, "asaprl_action_speed_scale", 3.0),
+            "observation_px_per_m": getattr(args, "asaprl_observation_px_per_m", 3.0),
+            "reference_heading_blend": getattr(
+                args, "asaprl_reference_heading_blend", 0.8
+            ),
+            "reference_speed_blend": getattr(
+                args, "asaprl_reference_speed_blend", 0.0
+            ),
+            "max_yaw_rate": getattr(args, "asaprl_max_yaw_rate", 0.3),
+            "max_speed": getattr(args, "asaprl_max_speed", 10.0),
+            "follow_reference_direction": not getattr(
+                args, "asaprl_no_follow_reference_direction", False
+            ),
         }
     raise ValueError(f"Unsupported policy: {policy}")
 

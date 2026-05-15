@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -31,62 +32,131 @@ class DiffuserPolicy(BasePolicy):
                 "Diffuser/TRACE requires working torch and tbsim installations."
             ) from exc
 
+        self._ensure_trace_bicycle_support(DiffuserModel)
         self.torch = torch
         self.ckpt_path = ckpt_path
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.config_path = Path(ckpt_path).with_name("config_copied.json")
+        self.trace_config = self._load_trace_config()
         self.model = self._load_model(DiffuserModel).to(self.device)
         self.model.eval()
 
+    def _load_trace_config(self) -> Dict:
+        if not self.config_path.exists():
+            return {}
+        with self.config_path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    @staticmethod
+    def _ensure_trace_bicycle_support(model_cls) -> None:
+        import tbsim.dynamics as dynamics
+        from tbsim.dynamics.base import DynType
+        from tbsim.dynamics.unicycle import Unicycle
+
+        if not hasattr(DynType, "BICYCLE"):
+            DynType.BICYCLE = 2
+
+        if not hasattr(dynamics, "Bicycle"):
+
+            class Bicycle(Unicycle):
+                def __init__(
+                    self,
+                    name,
+                    max_steer=0.5,
+                    max_yawvel=3,
+                    acce_bound=(-10, 8),
+                    vbound=(0, 20),
+                    wheelbase=2.0,
+                    d_f=1.0,
+                    d_r=1.0,
+                ):
+                    super().__init__(
+                        name,
+                        max_steer=max_steer,
+                        max_yawvel=max_yawvel,
+                        acce_bound=acce_bound,
+                        vbound=vbound,
+                    )
+                    self._type = DynType.BICYCLE
+                    self.wheelbase = wheelbase
+                    self.d_f = d_f
+                    self.d_r = d_r
+
+            dynamics.Bicycle = Bicycle
+
+        def create_dynamics(self):
+            if self._dynamics_type in ["Bicycle", DynType.BICYCLE]:
+                self.dyn = dynamics.Bicycle(
+                    "dynamics",
+                    max_steer=self._dynamics_kwargs["max_steer"],
+                    max_yawvel=self._dynamics_kwargs["max_yawvel"],
+                    acce_bound=self._dynamics_kwargs["acce_bound"],
+                    vbound=self._dynamics_kwargs.get("vbound", (0, 20)),
+                    wheelbase=self._dynamics_kwargs.get("wheelbase", 2.0),
+                    d_f=self._dynamics_kwargs.get("d_f", 1.0),
+                    d_r=self._dynamics_kwargs.get("d_r", 1.0),
+                )
+            elif self._dynamics_type in ["Unicycle", DynType.UNICYCLE]:
+                self.dyn = dynamics.Unicycle(
+                    "dynamics",
+                    max_steer=self._dynamics_kwargs["max_steer"],
+                    max_yawvel=self._dynamics_kwargs["max_yawvel"],
+                    acce_bound=self._dynamics_kwargs["acce_bound"],
+                )
+            else:
+                self.dyn = None
+
+        model_cls._create_dynamics = create_dynamics
+
     def _load_model(self, model_cls):
+        algo_config = self.trace_config.get("algo", {})
+        dynamics_config = dict(algo_config.get("dynamics", {}))
+        dynamics_type = dynamics_config.pop("type", "Unicycle")
         config = {
-            "map_encoder_model_arch": "resnet18",
+            "map_encoder_model_arch": algo_config.get("map_encoder_model_arch", "resnet18"),
             "input_image_shape": (4, 224, 224),
-            "map_feature_dim": 256,
-            "map_grid_feature_dim": 32,
-            "diffuser_model_arch": "TemporalMapUnet",
-            "horizon": 52,
+            "map_feature_dim": int(algo_config.get("map_feature_dim", 256)),
+            "map_grid_feature_dim": int(algo_config.get("map_grid_feature_dim", 32)),
+            "diffuser_model_arch": algo_config.get(
+                "diffuser_model_arch", "TemporalMapUnet"
+            ),
+            "horizon": int(algo_config.get("horizon", 52)),
             "observation_dim": 4,
             "action_dim": 2,
             "output_dim": 2,
-            "cond_feature_dim": 256,
-            "rasterized_map": True,
-            "use_map_feat_global": False,
-            "use_map_feat_grid": True,
-            "hist_num_frames": 31,
-            "hist_feature_dim": 128,
-            "n_timesteps": 100,
-            "loss_type": "l2",
-            "action_weight": 1.0,
-            "loss_discount": 1.0,
-            "dim_mults": (2, 4, 8),
-            "dynamics_type": {
-                "Bicycle": {
-                    "max_steer": 0.5,
-                    "max_yawvel": 3,
-                    "acce_bound": [-10, 8],
-                    "vbound": [0, 20],
-                    "wheelbase": 2.0,
-                    "d_f": 1.0,
-                    "d_r": 1.0,
-                },
-                "Unicycle": {
-                    "max_steer": 0.3,
-                    "max_yawvel": 0.5,
-                    "acce_bound": [-5, 5],
-                },
-            },
-            "dynamics_kwargs": {},
-            "base_dim": 32,
-            "diffuser_input_mode": "state_and_action",
+            "cond_feature_dim": int(algo_config.get("cond_feat_dim", 256)),
+            "rasterized_map": bool(algo_config.get("rasterized_map", True)),
+            "use_map_feat_global": bool(algo_config.get("use_map_feat_global", False)),
+            "use_map_feat_grid": bool(algo_config.get("use_map_feat_grid", True)),
+            "hist_num_frames": int(algo_config.get("history_num_frames", 30)) + 1,
+            "hist_feature_dim": int(algo_config.get("history_feature_dim", 128)),
+            "n_timesteps": int(algo_config.get("n_diffusion_steps", 100)),
+            "loss_type": algo_config.get("loss_type", "l2"),
+            "action_weight": float(algo_config.get("action_weight", 1.0)),
+            "loss_discount": float(algo_config.get("loss_discount", 1.0)),
+            "dim_mults": tuple(algo_config.get("dim_mults", (2, 4, 8))),
+            "dynamics_type": dynamics_type,
+            "dynamics_kwargs": dynamics_config,
+            "base_dim": int(algo_config.get("base_dim", 32)),
+            "diffuser_input_mode": algo_config.get(
+                "diffuser_input_mode", "state_and_action"
+            ),
             "use_conditioning": True,
             "cond_fill_value": -1.0,
-            "diffuser_norm_info": (
+            "diffuser_norm_info": algo_config.get(
+                "diffuser_norm_info",
+                (
                 [-3.538049, 0.004175, -1.360894, 0.001894, 0.015233, 0.000562],
                 [2.304491, 0.462847, 0.426683, 0.19193, 0.255089, 0.175583],
+                ),
             ),
-            "agent_hist_norm_info": ([0.0] * 5, [1.0] * 5),
-            "neighbor_hist_norm_info": ([0.0] * 5, [1.0] * 5),
-            "dt": self.dt,
+            "agent_hist_norm_info": algo_config.get(
+                "agent_hist_norm_info", ([0.0] * 5, [1.0] * 5)
+            ),
+            "neighbor_hist_norm_info": algo_config.get(
+                "neighbor_hist_norm_info", ([0.0] * 5, [1.0] * 5)
+            ),
+            "dt": float(algo_config.get("step_time", self.dt)),
         }
         model = model_cls(**config)
         checkpoint = self.torch.load(self.ckpt_path, map_location="cpu")
@@ -154,24 +224,34 @@ class DiffuserPolicy(BasePolicy):
         world_from_agent[0, :2, :2] = pose["rotation"]
         world_from_agent[0, :2, 2] = pose["position"]
 
-        extent = np.asarray(pose["extent"], dtype=np.float32)
+        extent = np.zeros((3,), dtype=np.float32)
+        pose_extent = np.asarray(pose["extent"], dtype=np.float32).reshape(-1)
+        extent[: min(3, pose_extent.size)] = pose_extent[: min(3, pose_extent.size)]
         return {
             "history_positions": torch.tensor(hist_positions, device=device),
             "history_yaws": torch.tensor(hist_yaws, device=device),
             "history_availabilities": torch.tensor(hist_avail, device=device),
             "history_speeds": torch.zeros(1, hist_num_frames, device=device),
-            "extent": torch.tensor(extent[:2][None], device=device),
+            "extent": torch.tensor(extent[None], device=device),
             "type": torch.ones(1, device=device),
             "curr_speed": torch.tensor([np.linalg.norm(pose["velocity"])], dtype=torch.float32, device=device),
             "image": torch.tensor(maps, device=device),
             "world_from_agent": torch.tensor(world_from_agent, device=device),
             "agent_from_world": torch.linalg.inv(torch.tensor(world_from_agent, device=device)),
             "raster_from_agent": torch.tensor(world_from_agent, device=device),
-            "all_other_agents_history_positions": torch.zeros(1, 0, hist_num_frames, 2, device=device),
-            "all_other_agents_history_yaws": torch.zeros(1, 0, hist_num_frames, 1, device=device),
-            "all_other_agents_history_speeds": torch.zeros(1, 0, hist_num_frames, device=device),
-            "all_other_agents_history_availabilities": torch.zeros(1, 0, hist_num_frames, device=device, dtype=torch.bool),
-            "all_other_agents_extents": torch.zeros(1, 0, 2, device=device),
-            "neigh_types": torch.zeros(1, 0, device=device),
+            "all_other_agents_history_positions": torch.zeros(
+                1, 1, hist_num_frames, 2, device=device
+            ),
+            "all_other_agents_history_yaws": torch.zeros(
+                1, 1, hist_num_frames, 1, device=device
+            ),
+            "all_other_agents_history_speeds": torch.zeros(
+                1, 1, hist_num_frames, device=device
+            ),
+            "all_other_agents_history_availabilities": torch.zeros(
+                1, 1, hist_num_frames, device=device, dtype=torch.bool
+            ),
+            "all_other_agents_extents": torch.zeros(1, 1, 3, device=device),
+            "neigh_types": torch.zeros(1, 1, device=device),
             "scene_index": torch.zeros(1, device=device, dtype=torch.long),
         }

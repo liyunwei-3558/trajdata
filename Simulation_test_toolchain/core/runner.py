@@ -32,6 +32,15 @@ def run_simulation(cfg: ToolchainConfig) -> SimulationResult:
     else:
         ego_policy_name = cfg.policies.ego_policy
 
+    non_ego_policy_name = (
+        cfg.policies.non_ego_policy
+        if cfg.simulation.mode == "multi_agent_closed_loop"
+        else "ground_truth"
+    )
+    needs_vector_map = "qcnet" in {
+        ego_policy_name.lower(),
+        non_ego_policy_name.lower(),
+    }
     use_raster_map = bool(cfg.policies.ego.get("require_raster_map", False))
     dataset = UnifiedDataset(
         desired_data=[f"sind-{cfg.dataset.location}"],
@@ -55,9 +64,10 @@ def run_simulation(cfg: ToolchainConfig) -> SimulationResult:
             if use_raster_map
             else None
         ),
-        incl_vector_map=False,
+        incl_vector_map=needs_vector_map,
         vector_map_params={
-            "collate": False,
+            "collate": needs_vector_map,
+            "associate_traffic_lights": False,
             "incl_road_lanes": True,
             "incl_road_areas": True,
             "incl_ped_crosswalks": True,
@@ -133,9 +143,7 @@ def run_simulation(cfg: ToolchainConfig) -> SimulationResult:
         checkpoints=cfg.checkpoints,
     )
     non_ego_policy = build_policy(
-        cfg.policies.non_ego_policy
-        if cfg.simulation.mode == "multi_agent_closed_loop"
-        else "ground_truth",
+        non_ego_policy_name,
         dt=cfg.dataset.desired_dt,
         params=cfg.policies.non_ego,
         checkpoints=cfg.checkpoints,
@@ -233,9 +241,7 @@ def _make_windowed_scene(scene, init_timestep: int, cfg: ToolchainConfig):
     )
     agent_presence = scene.agent_presence[:window_end]
     agent_names = {
-        agent.name
-        for present_agents in agent_presence
-        for agent in present_agents
+        agent.name for present_agents in agent_presence for agent in present_agents
     }
     agents = [agent for agent in scene.agents if agent.name in agent_names]
 
