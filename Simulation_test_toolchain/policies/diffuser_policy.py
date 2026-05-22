@@ -17,6 +17,7 @@ class DiffuserPolicy(BasePolicy):
         dt: float = 0.1,
         ckpt_path: Optional[str] = None,
         device: Optional[str] = None,
+        inference_interval_steps: int = 5,
         **kwargs,
     ) -> None:
         super().__init__(dt=dt)
@@ -36,6 +37,8 @@ class DiffuserPolicy(BasePolicy):
         self.torch = torch
         self.ckpt_path = ckpt_path
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.inference_interval_steps = max(1, int(inference_interval_steps))
+        self._cache: Dict[str, Dict[str, np.ndarray | int]] = {}
         self.config_path = Path(ckpt_path).with_name("config_copied.json")
         self.trace_config = self._load_trace_config()
         self.model = self._load_model(DiffuserModel).to(self.device)
@@ -170,30 +173,76 @@ class DiffuserPolicy(BasePolicy):
 
     def reset(self, obs=None, ego_idx: int = 0) -> PolicyState:
         self.state = PolicyState(agent_name="", dt=self.dt, initialized=True)
+        self._cache = {}
         return self.state
 
     def get_action(self, obs, ego_idx: int = 0) -> PolicyAction:
-        batch = self._build_batch(obs, ego_idx)
-        with self.torch.no_grad():
-            pred = self.model(
-                batch,
-                num_samp=1,
-                return_diffusion=False,
-                return_guidance_losses=False,
-                apply_guidance=False,
-            )
-        pos = pred["predictions"]["positions"][0, 0, 0].detach().cpu().numpy()
-        yaw = float(pred["predictions"]["yaws"][0, 0, 0, 0].detach().cpu().item())
         from Simulation_test_toolchain.core.state_utils import get_agent_world_pose
 
+        agent_name = str(obs.agent_name[ego_idx])
+        cache_entry = self._cache.get(agent_name)
+        used_cached = self._has_cached_step(cache_entry)
+        if not used_cached:
+            batch = self._build_batch(obs, ego_idx)
+            with self.torch.no_grad():
+                pred = self.model(
+                    batch,
+                    num_samp=1,
+                    return_diffusion=False,
+                    return_guidance_losses=False,
+                    apply_guidance=False,
+                )
+            cache_entry = {
+                "local_pos": pred["predictions"]["positions"][0, 0]
+                .detach()
+                .cpu()
+                .numpy(),
+                "local_yaw": pred["predictions"]["yaws"][0, 0, :, 0]
+                .detach()
+                .cpu()
+                .numpy(),
+                "step": 0,
+            }
+            pose = get_agent_world_pose(obs, ego_idx)
+            local_pos = np.asarray(cache_entry["local_pos"], dtype=float)
+            local_yaw = np.asarray(cache_entry["local_yaw"], dtype=float)
+            cache_entry["world_pos"] = pose["position"] + local_pos @ pose["rotation"].T
+            cache_entry["world_yaw"] = float(pose["heading"]) + local_yaw
+            self._cache[agent_name] = cache_entry
+
         pose = get_agent_world_pose(obs, ego_idx)
-        rot = pose["rotation"]
-        world_pos = pose["position"] + pos @ rot.T
-        xyh = np.array([world_pos[0], world_pos[1], pose["heading"] + yaw])
+        world_pos_traj = np.asarray(cache_entry["world_pos"], dtype=float)
+        world_yaw_traj = np.asarray(cache_entry["world_yaw"], dtype=float)
+        local_pos = np.asarray(cache_entry["local_pos"], dtype=float)
+        step = min(int(cache_entry["step"]), max(0, len(world_pos_traj) - 1))
+        pos = np.asarray(local_pos[step], dtype=float)
+        world_pos = np.asarray(world_pos_traj[step], dtype=float)
+        world_yaw = (
+            float(world_yaw_traj[step])
+            if len(world_yaw_traj)
+            else float(pose["heading"])
+        )
+        xyh = np.array([world_pos[0], world_pos[1], world_yaw])
+        cache_entry["step"] = int(cache_entry["step"]) + 1
         return PolicyAction(
             xyh=xyh,
-            command={"policy": self.policy_name, "pred_local_x": float(pos[0]), "pred_local_y": float(pos[1])},
+            command={
+                "policy": self.policy_name,
+                "inference_interval_steps": self.inference_interval_steps,
+                "used_cached_trajectory": used_cached,
+                "cached_step": int(step),
+                "pred_local_x": float(pos[0]),
+                "pred_local_y": float(pos[1]),
+            },
         )
+
+    def _has_cached_step(self, cache_entry: Optional[Dict[str, np.ndarray | int]]) -> bool:
+        if cache_entry is None:
+            return False
+        local_pos = np.asarray(cache_entry.get("local_pos", []))
+        step = int(cache_entry.get("step", 0))
+        max_steps = min(self.inference_interval_steps, len(local_pos))
+        return step < max_steps
 
     def _build_batch(self, obs, agent_idx: int) -> Dict:
         from Simulation_test_toolchain.core.state_utils import to_numpy, get_agent_world_pose

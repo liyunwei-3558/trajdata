@@ -37,6 +37,7 @@ class ASAPRLPolicy(BasePolicy):
         target_speed: float = 7.5,
         horizon: float = 3.0,
         ckpt_path: Optional[str] = None,
+        device: Optional[str] = None,
         use_risk_idm: bool = True,
         neighbor_radius: float = 50.0,
         inference_interval_steps: int = 5,
@@ -49,6 +50,7 @@ class ASAPRLPolicy(BasePolicy):
         max_yaw_rate: float = 0.3,
         max_speed: float = 10.0,
         follow_reference_direction: bool = True,
+        initial_velocity_override_mps: Optional[float] = None,
         **kwargs,
     ) -> None:
         super().__init__(dt=dt)
@@ -65,6 +67,9 @@ class ASAPRLPolicy(BasePolicy):
             ) from exc
 
         self.torch = torch
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = torch.device(device)
         self.target_speed = target_speed
         self.horizon = horizon
         self.ckpt_path = ckpt_path
@@ -80,6 +85,7 @@ class ASAPRLPolicy(BasePolicy):
         self.max_yaw_rate = max(0.0, float(max_yaw_rate))
         self.max_speed = max(0.0, float(max_speed))
         self.follow_reference_direction = bool(follow_reference_direction)
+        self.initial_velocity_override_mps = initial_velocity_override_mps
         self.model = self._load_actor()
 
     def _load_actor(self):
@@ -124,7 +130,7 @@ class ASAPRLPolicy(BasePolicy):
                 return torch.tanh(out["mu"])
 
         model = Actor()
-        checkpoint = torch.load(self.ckpt_path, map_location="cpu")
+        checkpoint = torch.load(self.ckpt_path, map_location=self.device)
         state_dict = checkpoint.get("model", checkpoint)
         actor_state = {}
         for key, value in state_dict.items():
@@ -141,17 +147,30 @@ class ASAPRLPolicy(BasePolicy):
                 "ASAPRL checkpoint did not match the expected actor layout. "
                 f"Missing keys include: {critical_missing[:5]}"
             )
+        model.to(self.device)
         model.eval()
         return model
 
     def reset(self, obs, ego_idx: int = 0) -> ASAPRLState:
         info = get_agent_world_pose(obs, ego_idx)
+        observed_velocity = float(np.linalg.norm(info["velocity"]))
+        initial_velocity = observed_velocity
+        if self.initial_velocity_override_mps is not None:
+            override = float(self.initial_velocity_override_mps)
+            if np.isfinite(override):
+                initial_velocity = max(0.0, override)
         self.state = ASAPRLState(
             agent_name=obs.agent_name[ego_idx],
             dt=self.dt,
             initialized=True,
-            velocity=float(np.linalg.norm(info["velocity"])),
+            velocity=initial_velocity,
         )
+        self.last_command = {
+            "policy": self.policy_name,
+            "observed_initial_velocity": observed_velocity,
+            "initial_velocity": initial_velocity,
+            "initial_velocity_override_mps": self.initial_velocity_override_mps,
+        }
         return self.state
 
     def get_action(self, obs, ego_idx: int = 0) -> PolicyAction:
@@ -169,8 +188,8 @@ class ASAPRLPolicy(BasePolicy):
             return self._repeat_cached_control(info)
 
         image = self._build_observation_image(obs, ego_idx)
-        with self.torch.no_grad():
-            tensor = self.torch.tensor(image[None], dtype=self.torch.float32)
+        with self.torch.inference_mode():
+            tensor = self.torch.tensor(image[None], dtype=self.torch.float32, device=self.device)
             latent = self.model(tensor).cpu().numpy()[0]
         latent = np.nan_to_num(latent, nan=0.0, posinf=1.0, neginf=-1.0)
 
@@ -254,6 +273,7 @@ class ASAPRLPolicy(BasePolicy):
         self.last_command = {
             "policy": self.policy_name,
             "inference_interval_steps": self.inference_interval_steps,
+            "device": str(self.device),
             "used_cached_control": False,
             "use_risk_idm": bool(self.use_risk_idm),
             "heading_control": "asaprl_motion_skill",
@@ -278,6 +298,7 @@ class ASAPRLPolicy(BasePolicy):
             "yaw_rate": float(yaw_rate),
             "acceleration": float(acceleration),
             "velocity": float(next_v),
+            "initial_velocity_override_mps": self.initial_velocity_override_mps,
         }
         return PolicyAction(
             xyh=np.array([next_pos[0], next_pos[1], next_heading]),
@@ -305,12 +326,14 @@ class ASAPRLPolicy(BasePolicy):
         self.last_command = {
             "policy": self.policy_name,
             "inference_interval_steps": self.inference_interval_steps,
+            "device": str(self.device),
             "used_cached_control": True,
             "use_risk_idm": bool(self.use_risk_idm),
             "heading_control": "cached_yaw_rate",
             "acceleration": float(acceleration),
             "yaw_rate": float(yaw_rate),
             "velocity": float(next_v),
+            "initial_velocity_override_mps": self.initial_velocity_override_mps,
         }
         return PolicyAction(
             xyh=np.array([next_pos[0], next_pos[1], next_heading]),

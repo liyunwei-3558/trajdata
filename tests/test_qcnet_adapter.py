@@ -9,6 +9,9 @@ from Simulation_test_toolchain.policies.qcnet_adapter import (
     build_qcnet_action,
     build_qcnet_sample_spec,
 )
+from Simulation_test_toolchain.policies.qcnet_policy import (
+    _apply_initial_speed_override,
+)
 
 
 def _seq(position, heading, velocity=None):
@@ -125,3 +128,17 @@ def test_build_qcnet_sample_spec_and_action():
     np.testing.assert_allclose(
         xyh[:2], np.asarray([10.0, 7.0], dtype=np.float32), atol=1e-6
     )
+
+
+def test_apply_initial_speed_override_scales_first_step_distance():
+    world_xy = np.asarray([[1.0, 0.0], [2.0, 0.0]], dtype=float)
+    scaled, scale = _apply_initial_speed_override(
+        world_xy,
+        np.asarray([0.0, 0.0], dtype=float),
+        target_speed_mps=2.0,
+        dt=0.1,
+    )
+
+    assert scale == 0.2
+    np.testing.assert_allclose(scaled[0], np.asarray([0.2, 0.0]), atol=1e-6)
+    np.testing.assert_allclose(scaled[1], np.asarray([0.4, 0.0]), atol=1e-6)

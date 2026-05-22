@@ -12,34 +12,13 @@ import pandas as pd
 from shapely.geometry import MultiPoint, Point, Polygon
 
 from Simulation_test_toolchain.core.records import AgentFrame, SimulationResult
-from risk_mining.intersection_spatiotemporal_density import infer_intersection_core_roi
-from risk_mining.lateral_deviation_variance import load_lane_references
-from risk_mining.structured_violations_noncompliance import (
-    _actual_maneuver_from_roi_geometry,
-    _allowed_movements_for_lane,
-    _first_true_index,
-    _last_true_index,
-    _points_inside_polygon,
-    _run_lengths,
-    _stable_entry_lane,
-    _status_at_scene_ts,
-    _status_name,
-    build_lane_indices,
-    build_lane_rule_indices,
-    query_lane_index,
-)
-from trajdata.dataset_specific.sind.sind_traffic_lights import (
-    build_traffic_light_dataframe,
-)
-from trajdata.dataset_specific.sind.scene_filters import load_curbstone_points
-from trajdata.maps import TrafficLightStatus
-
-
 LANE_MATCH_THRESHOLD_M = 2.0
 LANE_SAMPLE_SPACING_M = 1.0
 MIN_LANE_SPEED_MPS = 1.0
 MIN_WRONG_WAY_DURATION_S = 1.0
 WRONG_WAY_HEADING_THRESHOLD_DEG = 120.0
+RISK_TTC_HORIZON_STEPS = 25
+RISK_TTC_MAX_SECONDS = 2.5
 
 
 class MetricContext:
@@ -63,6 +42,15 @@ class MetricContext:
     def lane_context(self, location: str) -> Tuple[Optional[Any], Optional[Any], Optional[Polygon]]:
         if location not in self._lane_index_by_location:
             try:
+                from risk_mining.intersection_spatiotemporal_density import (
+                    infer_intersection_core_roi,
+                )
+                from risk_mining.lateral_deviation_variance import load_lane_references
+                from risk_mining.structured_violations_noncompliance import (
+                    build_lane_indices,
+                    build_lane_rule_indices,
+                )
+
                 references = load_lane_references(self.data_dir, [location])
                 lane_refs = references[location]
                 self._lane_refs_by_location[location] = lane_refs
@@ -95,6 +83,10 @@ class MetricContext:
         key = (location, scene_id, scene_length)
         if key not in self._signal_tables:
             try:
+                from trajdata.dataset_specific.sind.sind_traffic_lights import (
+                    build_traffic_light_dataframe,
+                )
+
                 table, report = build_traffic_light_dataframe(
                     scene_name=scene_name,
                     location=location,
@@ -138,6 +130,7 @@ def compute_batch_metrics(
     }
     metrics.update(_compute_ade_fde(ego_df, gt_df))
     metrics.update(_compute_collision_metrics(frames_df))
+    metrics.update(_compute_risk_metrics(frames_df, context.dt))
     metrics.update(_compute_offroad_metrics(ego_df, context.road_boundary(location)))
     metrics.update(
         _compute_violation_metrics(
@@ -273,6 +266,95 @@ def _compute_collision_metrics(frames_df: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
+def _compute_risk_metrics(frames_df: pd.DataFrame, dt: float) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "MinTTC": np.nan,
+        "AveTTC": np.nan,
+        "MRD": np.nan,
+        "ARD": np.nan,
+        "risk_frame_count": 0,
+    }
+    if frames_df.empty:
+        return result
+
+    frame_min_ttc: List[float] = []
+    frame_min_dist: List[float] = []
+    for _, step_df in frames_df.groupby("timestep", sort=True):
+        ego_rows = step_df[step_df["is_ego"]]
+        others = step_df[~step_df["is_ego"]]
+        if ego_rows.empty or others.empty:
+            continue
+        ego = ego_rows.iloc[0]
+        ego_poly = _agent_box_polygon(ego)
+        min_ttc = RISK_TTC_MAX_SECONDS
+        min_dist = float("inf")
+        for other in others.itertuples(index=False):
+            other_poly = _agent_box_polygon(other)
+            min_dist = min(min_dist, float(ego_poly.distance(other_poly)))
+            pair_ttc = _pair_rollout_ttc(ego, other, dt)
+            min_ttc = min(min_ttc, pair_ttc)
+        if np.isfinite(min_dist):
+            frame_min_dist.append(min_dist)
+            frame_min_ttc.append(min_ttc)
+
+    if frame_min_dist:
+        result["MRD"] = float(np.min(frame_min_dist))
+        result["ARD"] = float(np.mean(frame_min_dist))
+        result["MinTTC"] = float(np.min(frame_min_ttc))
+        result["AveTTC"] = float(np.mean(frame_min_ttc))
+        result["risk_frame_count"] = int(len(frame_min_dist))
+    return result
+
+
+def _pair_rollout_ttc(ego: Any, other: Any, dt: float) -> float:
+    ego_state = _row_motion_state(ego)
+    other_state = _row_motion_state(other)
+    for step in range(RISK_TTC_HORIZON_STEPS + 1):
+        ttc = step * dt
+        ego_future = _rollout_constant_heading(ego_state, ttc)
+        other_future = _rollout_constant_heading(other_state, ttc)
+        if _agent_state_polygon(ego_future).intersects(
+            _agent_state_polygon(other_future)
+        ):
+            return float(ttc)
+    return RISK_TTC_MAX_SECONDS
+
+
+def _row_motion_state(row: Any) -> Dict[str, float]:
+    speed = float(_row_value(row, "speed"))
+    heading = float(_row_value(row, "heading"))
+    return {
+        "x": float(_row_value(row, "x")),
+        "y": float(_row_value(row, "y")),
+        "heading": heading,
+        "speed": speed if np.isfinite(speed) else 0.0,
+        "length": max(float(_row_value(row, "length")), 0.1),
+        "width": max(float(_row_value(row, "width")), 0.1),
+    }
+
+
+def _rollout_constant_heading(state: Mapping[str, float], ttc: float) -> Dict[str, float]:
+    speed = float(state["speed"])
+    heading = float(state["heading"])
+    return {
+        **state,
+        "x": float(state["x"] + speed * math.cos(heading) * ttc),
+        "y": float(state["y"] + speed * math.sin(heading) * ttc),
+    }
+
+
+def _agent_state_polygon(state: Mapping[str, float]) -> Polygon:
+    return Polygon(
+        _box_corners(
+            float(state["x"]),
+            float(state["y"]),
+            float(state["heading"]),
+            float(state["length"]),
+            float(state["width"]),
+        )
+    )
+
+
 def _compute_offroad_metrics(ego_df: pd.DataFrame, road_boundary: Optional[Any]) -> Dict[str, Any]:
     result = {
         "offroad_observable": road_boundary is not None,
@@ -316,6 +398,22 @@ def _compute_violation_metrics(
     }
     if len(ego_df) < 2:
         return result
+
+    try:
+        from risk_mining.structured_violations_noncompliance import (
+            _actual_maneuver_from_roi_geometry,
+            _allowed_movements_for_lane,
+            _first_true_index,
+            _last_true_index,
+            _points_inside_polygon,
+            _run_lengths,
+            _stable_entry_lane,
+            _status_name,
+            query_lane_index,
+        )
+    except ImportError:
+        return result
+    from trajdata.maps import TrafficLightStatus
 
     lane_index, lane_rule_index, roi = context.lane_context(location)
     if lane_index is None or roi is None:
@@ -401,6 +499,11 @@ def _status_for_entry(
 ) -> Tuple[Optional[int], str]:
     if tls_df is None:
         return None, ""
+    try:
+        from risk_mining.structured_violations_noncompliance import _status_at_scene_ts
+    except ImportError:
+        return None, ""
+
     for lane_id in lane_ids:
         if not lane_id:
             continue
@@ -412,6 +515,8 @@ def _status_for_entry(
 
 def _load_curbstone_boundary(location: str) -> Optional[Any]:
     try:
+        from trajdata.dataset_specific.sind.scene_filters import load_curbstone_points
+
         city_points = load_curbstone_points()
         curbstone = city_points[location]
         points = []
@@ -437,6 +542,16 @@ def _agent_box_corners(row: Any) -> List[Tuple[float, float]]:
     x = float(_row_value(row, "x"))
     y = float(_row_value(row, "y"))
     heading = float(_row_value(row, "heading"))
+    return _box_corners(x, y, heading, length, width)
+
+
+def _box_corners(
+    x: float,
+    y: float,
+    heading: float,
+    length: float,
+    width: float,
+) -> List[Tuple[float, float]]:
     local = np.array(
         [
             [length / 2.0, width / 2.0],

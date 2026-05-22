@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -14,6 +14,7 @@ class DatasetConfig:
     data_dir: str = "datasets/SinD_dataset"
     desired_dt: float = 0.1
     use_lanelet2_maps: bool = True
+    agent_types: Optional[List[str]] = None
 
 
 @dataclass
@@ -28,6 +29,7 @@ class ScenarioConfig:
     semantic_label_path: str = "datasets/SinD_dataset/Semantic_labels/scenarios.json"
     semantic_min_num_steps: int = 150
     semantic_label: Optional[Dict[str, Any]] = None
+    allow_ego_fallback: bool = True
 
 
 @dataclass
@@ -36,6 +38,10 @@ class SimulationConfig:
     history_sec: float = 2.0
     future_sec: float = 4.0
     neighbor_radius: float = 50.0
+    controlled_neighbor_radius_m: float = 25.0
+    controlled_neighbor_max_agents: int = 5
+    controlled_neighbor_forward_only: bool = True
+    controlled_neighbor_min_speed_mps: float = 0.3
 
 
 @dataclass
@@ -49,6 +55,7 @@ class PolicyConfig:
 @dataclass
 class CheckpointConfig:
     asaprl_ckpt_path: Optional[str] = None
+    asaprl_device: Optional[str] = None
     diffuser_ckpt_path: Optional[str] = None
     qcnet_ckpt_path: Optional[str] = None
     qcnet_repo_path: Optional[str] = None

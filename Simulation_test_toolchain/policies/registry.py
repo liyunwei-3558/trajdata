@@ -22,6 +22,7 @@ def build_policy(
         from .asaprl import ASAPRLPolicy
 
         params.setdefault("ckpt_path", getattr(checkpoints, "asaprl_ckpt_path", None))
+        params.setdefault("device", getattr(checkpoints, "asaprl_device", None))
         return ASAPRLPolicy(dt=dt, **params)
     if name == "diffuser":
         from .diffuser_policy import DiffuserPolicy

@@ -61,6 +61,7 @@ class RiskIDMPolicy(BasePolicy):
         min_acceleration: float = -5.0,
         neighbor_radius: float = 50.0,
         inference_interval_steps: int = 5,
+        initial_velocity_override_mps: Optional[float] = None,
         **kwargs,
     ) -> None:
         super().__init__(dt=dt)
@@ -69,15 +70,28 @@ class RiskIDMPolicy(BasePolicy):
         self.min_acceleration = min_acceleration
         self.neighbor_radius = neighbor_radius
         self.inference_interval_steps = max(1, int(inference_interval_steps))
+        self.initial_velocity_override_mps = initial_velocity_override_mps
 
     def reset(self, obs, ego_idx: int = 0) -> RiskIDMState:
         info = get_agent_world_pose(obs, ego_idx)
+        observed_velocity = float(np.linalg.norm(info["velocity"]))
+        initial_velocity = observed_velocity
+        if self.initial_velocity_override_mps is not None:
+            override = float(self.initial_velocity_override_mps)
+            if np.isfinite(override):
+                initial_velocity = max(0.0, override)
         self.state = RiskIDMState(
             agent_name=obs.agent_name[ego_idx],
             dt=self.dt,
             initialized=True,
-            velocity=float(np.linalg.norm(info["velocity"])),
+            velocity=initial_velocity,
         )
+        self.last_command = {
+            "policy": self.policy_name,
+            "observed_initial_velocity": observed_velocity,
+            "initial_velocity": initial_velocity,
+            "initial_velocity_override_mps": self.initial_velocity_override_mps,
+        }
         return self.state
 
     def get_action(self, obs, ego_idx: int = 0) -> PolicyAction:
@@ -133,6 +147,7 @@ class RiskIDMPolicy(BasePolicy):
             "used_cached_control": not should_infer,
             "acceleration": acceleration,
             "velocity": new_velocity,
+            "initial_velocity_override_mps": self.initial_velocity_override_mps,
             "min_ttc": ttc,
             "target_agent": target_agent,
             "reference_progress_m": float(step_dist),

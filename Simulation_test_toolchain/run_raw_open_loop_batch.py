@@ -416,7 +416,7 @@ def _summary_row(label: str, df: pd.DataFrame) -> Dict[str, Any]:
         "failed_runs": int((df["status"] == "failed").sum()),
         "skipped_runs": int((df["status"] == "skipped").sum()),
     }
-    for metric in ("ADE", "FDE"):
+    for metric in ("ADE", "FDE", "MinTTC", "AveTTC", "MRD", "ARD"):
         values = _numeric_series(completed, metric)
         row[f"{metric}_mean"] = float(values.mean()) if len(values) else np.nan
         row[f"{metric}_median"] = float(values.median()) if len(values) else np.nan
